@@ -14,6 +14,7 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { api } from '../../services/api';
+import { applyOptimisticTableStatus } from '../../lib/realtimeEvents';
 import type {
   RestaurantSnapshot,
   RestaurantTable,
@@ -27,6 +28,7 @@ import { QrPreviewModal } from '../common/QrPreviewModal';
 interface ManagerTablesProps {
   snapshot: RestaurantSnapshot;
   onRefresh: () => Promise<void>;
+  onOptimisticUpdate?: (updater: (prev: RestaurantSnapshot) => RestaurantSnapshot) => () => void;
   onOpenCustomerPreview: (qrToken: string) => void;
 }
 
@@ -50,6 +52,7 @@ const TABLE_TYPES: TableType[] = ['regular', 'couple', 'family', 'outdoor', 'vip
 export const ManagerTables: React.FC<ManagerTablesProps> = ({
   snapshot,
   onRefresh,
+  onOptimisticUpdate,
   onOpenCustomerPreview,
 }) => {
   const [floorFilter, setFloorFilter] = useState<string>('all');
@@ -194,12 +197,16 @@ export const ManagerTables: React.FC<ManagerTablesProps> = ({
   };
 
   const handleBlockToggle = async (table: RestaurantTable) => {
+    const nextStatus: TableStatus = table.status === 'Blocked' ? 'Available' : 'Blocked';
+    const rollback = onOptimisticUpdate
+      ? onOptimisticUpdate((prev) => applyOptimisticTableStatus(prev, table.id, nextStatus))
+      : undefined;
     try {
-      const nextStatus: TableStatus = table.status === 'Blocked' ? 'Available' : 'Blocked';
       await api.updateTable(table.id, { status: nextStatus });
       showToast('ok', `Table ${table.tableNumber} marked ${nextStatus}.`);
       await onRefresh();
     } catch (err) {
+      rollback?.();
       showToast('err', err instanceof Error ? err.message : 'Action failed.');
     }
   };

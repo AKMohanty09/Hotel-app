@@ -30,6 +30,8 @@ interface ManagerPortalProps {
   sidebarOpen: boolean;
   onCloseSidebar: () => void;
   onRefresh: () => Promise<void>;
+  onOptimisticUpdate?: (updater: (prev: RestaurantSnapshot) => RestaurantSnapshot) => () => void;
+  onErrorToast?: (msg: string) => void;
   onOpenCustomerPreview: (qrToken: string) => void;
 }
 
@@ -53,6 +55,8 @@ export const ManagerPortal: React.FC<ManagerPortalProps> = ({
   sidebarOpen,
   onCloseSidebar,
   onRefresh,
+  onOptimisticUpdate,
+  onErrorToast,
   onOpenCustomerPreview,
 }) => {
   const [activeTab, setActiveTab] = useState<ManagerTabId>('dashboard');
@@ -219,21 +223,37 @@ export const ManagerPortal: React.FC<ManagerPortalProps> = ({
           <ManagerTables
             snapshot={snapshot}
             onRefresh={onRefresh}
+            onOptimisticUpdate={onOptimisticUpdate}
             onOpenCustomerPreview={onOpenCustomerPreview}
           />
         )}
         {activeItem?.id === 'orders' && (
-          <ManagerOrdersAndOnline snapshot={snapshot} mode="orders" onRefresh={onRefresh} />
+          <ManagerOrdersAndOnline
+            snapshot={snapshot}
+            mode="orders"
+            onRefresh={onRefresh}
+            onOptimisticUpdate={onOptimisticUpdate}
+          />
         )}
         {activeItem?.id === 'online' && (
-          <ManagerOrdersAndOnline snapshot={snapshot} mode="online" onRefresh={onRefresh} />
+          <ManagerOrdersAndOnline
+            snapshot={snapshot}
+            mode="online"
+            onRefresh={onRefresh}
+            onOptimisticUpdate={onOptimisticUpdate}
+          />
         )}
         {activeItem?.id === 'menu' && (
           <ManagerMenuAndInventory snapshot={snapshot} mode="menu" onRefresh={onRefresh} />
         )}
         {activeItem?.id === 'kitchen' && (
           <div className="rounded-2xl overflow-hidden border border-slate-800">
-            <KitchenPortal snapshot={snapshot} onRefresh={onRefresh} />
+            <KitchenPortal
+              snapshot={snapshot}
+              onRefresh={onRefresh}
+              onOptimisticUpdate={onOptimisticUpdate}
+              onErrorToast={onErrorToast}
+            />
           </div>
         )}
         {activeItem?.id === 'billing' && (

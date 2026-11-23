@@ -59,6 +59,7 @@ export type TicketStatus =
   | 'served'
   | 'packed'
   | 'picked_up'
+  | 'completed'
   | 'cancelled';
 
 export type ServiceRequestType =

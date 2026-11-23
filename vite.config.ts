@@ -6,8 +6,41 @@ import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
+  let disableViteClientWs = false;
   return {
     plugins: [
+      {
+        name: 'disable-vite-client-ws-when-hmr-off',
+        apply: 'serve' as const,
+        configResolved(resolvedConfig) {
+          disableViteClientWs =
+            resolvedConfig.server.hmr === false ||
+            resolvedConfig.server.ws === false;
+        },
+        transform(code, id) {
+          if (!disableViteClientWs) return;
+          const startMarker = 'const transport = normalizeModuleRunnerTransport(';
+          const endMarker = '\nlet willUnload = false;';
+          if (
+            id.includes('vite/dist/client/client.mjs') &&
+            code.includes(startMarker)
+          ) {
+            const startIdx = code.indexOf(startMarker);
+            const endIdx = code.indexOf(endMarker, startIdx);
+            if (startIdx !== -1 && endIdx !== -1) {
+              const noopTransport =
+                'const transport = normalizeModuleRunnerTransport({\n  async connect() {},\n  async disconnect() {},\n  send() {},\n});';
+              return {
+                code:
+                  code.slice(0, startIdx) +
+                  noopTransport +
+                  code.slice(endIdx),
+                map: null,
+              };
+            }
+          }
+        },
+      },
       react(),
       tailwindcss(),
       VitePWA({
@@ -81,6 +114,7 @@ export default defineConfig(() => {
       port: 3000,
       allowedHosts: true as const,
       hmr: process.env.DISABLE_HMR !== 'true',
+      ws: process.env.DISABLE_HMR === 'true' ? false : undefined,
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },
   };

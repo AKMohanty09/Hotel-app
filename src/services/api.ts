@@ -277,6 +277,32 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
+  confirmOrder: (id: string) =>
+    requestJson<{ order: Order; tickets: KitchenTicket[] }>(
+      `/api/orders/${encodeURIComponent(id)}/confirm`,
+      { method: 'POST' }
+    ),
+
+  getRealtimeConfig: () =>
+    requestJson<{
+      wsPath: string;
+      supabase: {
+        enabled: boolean;
+        url: string | null;
+        anonKey: string | null;
+        jwtSigningReady: boolean;
+      };
+    }>('/api/realtime/config'),
+  getRealtimeToken: (body?: { qrToken?: string; tableId?: string; sessionId?: string }) =>
+    requestJson<{
+      scope: 'staff' | 'customer';
+      tableId?: string;
+      token: string | null;
+      expiresAt: string | null;
+    }>('/api/realtime/token', {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
+    }),
 
   updateKitchenTicket: (
     id: string,

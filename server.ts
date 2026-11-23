@@ -19,7 +19,22 @@ function broadcastEvent(type: string, payload: Record<string, unknown> = {}) {
 
 const app = createApp({ onEvent: broadcastEvent });
 const server = http.createServer(app);
-wss = new WebSocketServer({ server, path: '/ws' });
+wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+  try {
+    const pathname = new URL(request.url || '/', 'http://localhost').pathname;
+    if (pathname === '/ws') {
+      wss?.handleUpgrade(request, socket, head, (ws) => {
+        wss?.emit('connection', ws, request);
+      });
+      return;
+    }
+  } catch {
+    // ignore malformed upgrade URL
+  }
+  socket.destroy();
+});
 
 wss.on('connection', (ws) => {
   ws.send(JSON.stringify({ type: 'connected', timestamp: new Date().toISOString() }));
@@ -30,7 +45,13 @@ async function startServer() {
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false, allowedHosts: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        ws: false,
+        watch: null,
+        allowedHosts: true,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

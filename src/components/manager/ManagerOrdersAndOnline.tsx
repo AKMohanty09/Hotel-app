@@ -11,6 +11,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { api } from '../../services/api';
+import { applyOptimisticOrderConfirmed } from '../../lib/realtimeEvents';
 import type { Order, OrderPriority, OrderStatus, RestaurantSnapshot } from '../../types/domain';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 
@@ -18,6 +19,7 @@ interface ManagerOrdersAndOnlineProps {
   snapshot: RestaurantSnapshot;
   mode: 'orders' | 'online';
   onRefresh: () => Promise<void>;
+  onOptimisticUpdate?: (updater: (prev: RestaurantSnapshot) => RestaurantSnapshot) => () => void;
 }
 
 const ORDER_STATUSES: OrderStatus[] = [
@@ -38,11 +40,12 @@ export const ManagerOrdersAndOnline: React.FC<ManagerOrdersAndOnlineProps> = ({
   snapshot,
   mode,
   onRefresh,
+  onOptimisticUpdate,
 }) => {
   const [search, setSearch] = useState('');
   const [channelFilter, setChannelFilter] = useState<string>(mode === 'online' ? 'online_all' : 'all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
-  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [cancelTarget, setCancelTarget] = useState<Order | null>(null);
   const [cancelReason, setCancelReason] = useState('');
   const [refireTarget, setRefireTarget] = useState<Order | null>(null);
@@ -85,12 +88,27 @@ export const ManagerOrdersAndOnline: React.FC<ManagerOrdersAndOnlineProps> = ({
     });
   }, [snapshot.orders, mode, channelFilter, statusFilter, search]);
 
+  const selectedOrder = useMemo(
+    () => (selectedOrderId ? snapshot.orders.find((o) => o.id === selectedOrderId) || null : null),
+    [snapshot.orders, selectedOrderId]
+  );
+
   const handleStatusUpdate = async (order: Order, nextStatus: OrderStatus) => {
+    const rollback =
+      order.status === 'Submitted' && nextStatus === 'Confirmed' && onOptimisticUpdate
+        ? onOptimisticUpdate((prev) => applyOptimisticOrderConfirmed(prev, order.id))
+        : undefined;
     try {
-      await api.updateOrder(order.id, { status: nextStatus });
-      notify(`${order.orderNumber} marked ${nextStatus}.`);
+      if (order.status === 'Submitted' && nextStatus === 'Confirmed') {
+        await api.confirmOrder(order.id);
+        notify(`${order.orderNumber} confirmed and sent to kitchen.`);
+      } else {
+        await api.updateOrder(order.id, { status: nextStatus });
+        notify(`${order.orderNumber} marked ${nextStatus}.`);
+      }
       await onRefresh();
     } catch (err) {
+      rollback?.();
       notify(err instanceof Error ? err.message : 'Status update failed.');
     }
   };
@@ -395,7 +413,7 @@ export const ManagerOrdersAndOnline: React.FC<ManagerOrdersAndOnlineProps> = ({
                     <div className="inline-flex items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={() => setSelectedOrder(order)}
+                        onClick={() => setSelectedOrderId(order.id)}
                         className="rounded-lg border border-slate-200 dark:border-dusk px-2.5 py-1 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
                       >
                         Timeline
@@ -493,7 +511,7 @@ export const ManagerOrdersAndOnline: React.FC<ManagerOrdersAndOnlineProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => setSelectedOrder(null)}
+                onClick={() => setSelectedOrderId(null)}
                 className="text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100"
               >
                 Close

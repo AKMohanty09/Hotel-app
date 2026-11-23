@@ -153,6 +153,92 @@ function getSupabaseClient(): SupabaseClient {
   return global._shSupabaseClient;
 }
 
+export function getPublicSupabaseRealtimeConfig(): {
+  enabled: boolean;
+  url: string | null;
+  anonKey: string | null;
+  jwtSigningReady: boolean;
+} {
+  if (getStorageBackend() !== 'supabase') {
+    return { enabled: false, url: null, anonKey: null, jwtSigningReady: false };
+  }
+  const url = process.env.SUPABASE_URL?.trim() || null;
+  const anonKey =
+    process.env.SUPABASE_ANON_KEY?.trim() ||
+    process.env.VITE_SUPABASE_ANON_KEY?.trim() ||
+    process.env.SUPABASE_PUBLISHABLE_KEY?.trim() ||
+    null;
+  const jwtSecret = process.env.SUPABASE_JWT_SECRET?.trim() || '';
+  return {
+    enabled: Boolean(url && anonKey),
+    url,
+    anonKey,
+    jwtSigningReady: Boolean(url && anonKey && jwtSecret.length >= 16),
+  };
+}
+
+export function issueScopedRealtimeJwt(claims: {
+  app_scope: 'staff' | 'customer';
+  staff_id?: string;
+  staff_role?: string;
+  table_id?: string;
+  session_id?: string;
+}): { token: string; expiresAt: string } | null {
+  const secret = process.env.SUPABASE_JWT_SECRET?.trim();
+  if (!secret || secret.length < 16) return null;
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expSec = nowSec + 3600;
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadObj: Record<string, unknown> = {
+    aud: 'authenticated',
+    role: 'authenticated',
+    sub: claims.staff_id || (claims.table_id ? `guest_${claims.table_id}` : 'guest'),
+    iat: nowSec,
+    exp: expSec,
+    app_scope: claims.app_scope,
+  };
+  if (claims.staff_id) payloadObj.staff_id = claims.staff_id;
+  if (claims.staff_role) payloadObj.staff_role = claims.staff_role;
+  if (claims.table_id) payloadObj.table_id = claims.table_id;
+  if (claims.session_id) payloadObj.session_id = claims.session_id;
+
+  const payload = Buffer.from(JSON.stringify(payloadObj)).toString('base64url');
+  const signature = crypto
+    .createHmac('sha256', secret)
+    .update(`${header}.${payload}`)
+    .digest('base64url');
+
+  return {
+    token: `${header}.${payload}.${signature}`,
+    expiresAt: new Date(expSec * 1000).toISOString(),
+  };
+}
+
+export async function emitSupabaseRealtimeBroadcast(eventPayload: Record<string, unknown>): Promise<void> {
+  if (getStorageBackend() !== 'supabase') return;
+  try {
+    const sb = getSupabaseClient();
+    const channels: string[] = ['sh:workspace'];
+    const tableId = typeof eventPayload.tableId === 'string' ? eventPayload.tableId : undefined;
+    if (tableId) {
+      channels.push(`sh:table:${tableId}`);
+    }
+    await Promise.all(
+      channels.map(async (channelName) => {
+        const ch = sb.channel(channelName);
+        try {
+          await ch.httpSend('pos_event', eventPayload);
+        } finally {
+          await sb.removeChannel(ch).catch(() => {});
+        }
+      })
+    );
+  } catch {
+    // Non-fatal: WebSocket /ws and client catch-up polling still guarantee delivery
+  }
+}
+
 async function getSqliteDb(): Promise<import('node:sqlite').DatabaseSync> {
   if (global._shSqliteDb) return global._shSqliteDb;
   if (!global._shSqliteInitPromise) {

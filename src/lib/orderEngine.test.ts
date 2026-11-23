@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  canStaffConfirmTableOrder,
   deriveOrderStatusFromTickets,
   splitOrderIntoKitchenTickets,
   validateAndPriceOrderItems,
@@ -195,5 +196,93 @@ test('validateAndPriceOrderItems prices Small / Medium / Large size variants and
       'dine_in_qr'
     );
   }, /Invalid size\/variant/);
+});
+
+test('deriveOrderStatusFromTickets transitions to Completed when all active tickets are completed', () => {
+  const tickets: KitchenTicket[] = [
+    {
+      id: 't1',
+      orderId: 'o1',
+      orderNumber: 'ORD-2',
+      channel: 'dine_in_qr',
+      stationId: 'st_pizza',
+      stationName: 'Pizza',
+      priority: 'normal',
+      status: 'completed',
+      items: [],
+      estimatedMinutes: 15,
+      createdAt: '',
+      updatedAt: '',
+    },
+    {
+      id: 't2',
+      orderId: 'o1',
+      orderNumber: 'ORD-2',
+      channel: 'dine_in_qr',
+      stationId: 'st_bev',
+      stationName: 'Bar',
+      priority: 'normal',
+      status: 'completed',
+      items: [],
+      estimatedMinutes: 5,
+      createdAt: '',
+      updatedAt: '',
+    },
+  ];
+  assert.equal(deriveOrderStatusFromTickets(tickets, 'dine_in_qr', 'Ready'), 'Completed');
+  tickets[1].status = 'ready';
+  assert.equal(deriveOrderStatusFromTickets(tickets, 'dine_in_qr', 'Ready'), 'Ready');
+});
+
+test('canStaffConfirmTableOrder permits assigned waiter and manager, blocks unassigned waiter and non-waiter kitchen staff', () => {
+  const order = {
+    id: 'ord_1',
+    orderNumber: 'ORD-1050',
+    status: 'Submitted' as const,
+    tableId: 'tbl_1',
+    waiterId: 'stf_w1',
+    channel: 'dine_in_qr' as const,
+  };
+  const table = { id: 'tbl_1', assignedWaiterId: 'stf_w1' };
+  const session = { id: 'ses_1', waiterId: 'stf_w1' };
+
+  assert.equal(
+    canStaffConfirmTableOrder(order, table, session, {
+      id: 'stf_w1',
+      uid: 'stf_w1',
+      role: 'waiter',
+      assignedTableIds: ['tbl_1'],
+    }).allowed,
+    true
+  );
+
+  const otherWaiter = canStaffConfirmTableOrder(order, table, session, {
+    id: 'stf_w2',
+    uid: 'stf_w2',
+    role: 'waiter',
+    assignedTableIds: ['tbl_2'],
+  });
+  assert.equal(otherWaiter.allowed, false);
+  assert.match(otherWaiter.reason || '', /assigned to this table/i);
+
+  assert.equal(
+    canStaffConfirmTableOrder(order, table, session, {
+      id: 'stf_mgr',
+      uid: 'stf_mgr',
+      role: 'manager',
+      assignedTableIds: [],
+    }).allowed,
+    true
+  );
+
+  assert.equal(
+    canStaffConfirmTableOrder(order, table, session, {
+      id: 'stf_kds',
+      uid: 'stf_kds',
+      role: 'kitchen_staff',
+      assignedTableIds: [],
+    }).allowed,
+    false
+  );
 });
 

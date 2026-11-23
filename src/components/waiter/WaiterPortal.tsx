@@ -12,6 +12,12 @@ import {
   Utensils,
 } from 'lucide-react';
 import { api } from '../../services/api';
+import {
+  applyOptimisticOrderConfirmed,
+  applyOptimisticServiceRequestStatus,
+  applyOptimisticTableStatus,
+  applyOptimisticTicketStatus,
+} from '../../lib/realtimeEvents';
 import type {
   Bill,
   PaymentMethod,
@@ -25,12 +31,14 @@ interface WaiterPortalProps {
   snapshot: RestaurantSnapshot;
   currentStaff: StaffProfile;
   onRefresh: () => Promise<void>;
+  onOptimisticUpdate?: (updater: (prev: RestaurantSnapshot) => RestaurantSnapshot) => () => void;
 }
 
 export const WaiterPortal: React.FC<WaiterPortalProps> = ({
   snapshot,
   currentStaff,
   onRefresh,
+  onOptimisticUpdate,
 }) => {
   const [tab, setTab] = useState<'tables' | 'verify' | 'service' | 'order' | 'bills'>('tables');
   const [revealedOtps, setRevealedOtps] = useState<Record<string, { otp: string; expiresAt: string }>>({});
@@ -78,6 +86,52 @@ export const WaiterPortal: React.FC<WaiterPortalProps> = ({
     [snapshot.serviceRequests]
   );
 
+  const pendingConfirmationOrders = useMemo(
+    () => snapshot.orders.filter((o) => o.status === 'Submitted' && Boolean(o.tableId)),
+    [snapshot.orders]
+  );
+
+  const activeFloorOrders = useMemo(
+    () =>
+      snapshot.orders.filter(
+        (o) => Boolean(o.tableId) && o.status !== 'Cancelled' && o.status !== 'Completed'
+      ),
+    [snapshot.orders]
+  );
+
+  const handleConfirmOrder = async (orderId: string) => {
+    setBusyId(orderId);
+    const rollback = onOptimisticUpdate
+      ? onOptimisticUpdate((prev) => applyOptimisticOrderConfirmed(prev, orderId))
+      : undefined;
+    try {
+      const res = await api.confirmOrder(orderId);
+      notify(`Confirmed ${res.order.orderNumber} and sent to kitchen!`);
+      await onRefresh();
+    } catch (err) {
+      rollback?.();
+      notify(err instanceof Error ? err.message : 'Unable to confirm table order.');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleRejectPendingOrder = async (orderId: string) => {
+    setBusyId(orderId);
+    try {
+      await api.updateOrder(orderId, {
+        status: 'Cancelled',
+        cancellationReason: 'Rejected at table check',
+      });
+      notify('Order rejected and cancelled.');
+      await onRefresh();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Unable to reject order.');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const handleConfirmPresence = async (requestId: string) => {
     setBusyId(requestId);
     try {
@@ -110,14 +164,19 @@ export const WaiterPortal: React.FC<WaiterPortalProps> = ({
 
   const handleServeTicket = async (ticketId: string, partial = false) => {
     setBusyId(ticketId);
+    const nextStatus = partial ? 'preparing' : 'served';
+    const rollback = onOptimisticUpdate
+      ? onOptimisticUpdate((prev) => applyOptimisticTicketStatus(prev, ticketId, nextStatus))
+      : undefined;
     try {
       await api.updateKitchenTicket(ticketId, {
-        status: partial ? 'preparing' : 'served',
+        status: nextStatus,
         clarificationNote: partial ? 'Partially served at table' : undefined,
       });
       notify(partial ? 'Marked partially served.' : 'Marked served at table.');
       await onRefresh();
     } catch (err) {
+      rollback?.();
       notify(err instanceof Error ? err.message : 'Action failed.');
     } finally {
       setBusyId(null);
@@ -126,11 +185,15 @@ export const WaiterPortal: React.FC<WaiterPortalProps> = ({
 
   const handleServiceAction = async (id: string, status: 'Accepted' | 'Completed' | 'Unavailable') => {
     setBusyId(id);
+    const rollback = onOptimisticUpdate
+      ? onOptimisticUpdate((prev) => applyOptimisticServiceRequestStatus(prev, id, status))
+      : undefined;
     try {
       await api.updateServiceRequest(id, status);
       notify(`Service request marked ${status}.`);
       await onRefresh();
     } catch (err) {
+      rollback?.();
       notify(err instanceof Error ? err.message : 'Update failed.');
     } finally {
       setBusyId(null);
@@ -139,11 +202,15 @@ export const WaiterPortal: React.FC<WaiterPortalProps> = ({
 
   const handleTableStatus = async (tableId: string, status: RestaurantTable['status']) => {
     setBusyId(tableId);
+    const rollback = onOptimisticUpdate
+      ? onOptimisticUpdate((prev) => applyOptimisticTableStatus(prev, tableId, status))
+      : undefined;
     try {
       await api.updateTable(tableId, { status });
       notify(`Table updated to ${status}.`);
       await onRefresh();
     } catch (err) {
+      rollback?.();
       notify(err instanceof Error ? err.message : 'Table update failed.');
     } finally {
       setBusyId(null);
@@ -297,6 +364,74 @@ export const WaiterPortal: React.FC<WaiterPortalProps> = ({
               </button>
             </div>
 
+            {pendingConfirmationOrders.length > 0 && (
+              <section className="rounded-2xl border-2 border-orange-400 dark:border-orange-500/80 bg-orange-50/70 dark:bg-orange-950/30 p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-display text-base font-bold text-slate-900 dark:text-slate-100">
+                      Orders Awaiting Waiter Confirmation ({pendingConfirmationOrders.length})
+                    </h3>
+                    <p className="text-xs text-slate-600 dark:text-slate-400">
+                      Confirm guest orders at your assigned tables before dispatching tickets to Kitchen KDS.
+                    </p>
+                  </div>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  {pendingConfirmationOrders.map((order) => (
+                    <div
+                      key={order.id}
+                      className="rounded-xl border border-orange-200 dark:border-orange-800/70 bg-white dark:bg-slate-900 p-4 space-y-3 shadow-sm"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="font-mono text-sm font-bold text-slate-900 dark:text-slate-100">
+                            {order.orderNumber} · Table {order.tableNumber || '-'}
+                          </div>
+                          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                            Placed {new Date(order.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </div>
+                        </div>
+                        <span className="font-mono text-sm font-bold text-orange-600 dark:text-orange-400 tabular-nums">
+                          {cur}{order.totalAmount.toFixed(2)}
+                        </span>
+                      </div>
+                      <ul className="text-xs text-slate-700 dark:text-slate-300 space-y-1">
+                        {order.items.map((it) => (
+                          <li key={it.id} className="flex justify-between gap-2">
+                            <span>
+                              {it.quantity} × {it.name}
+                              {it.instructions ? ` (${it.instructions})` : ''}
+                            </span>
+                            <span className="font-mono text-slate-500 dark:text-slate-400">
+                              {cur}{it.lineTotal.toFixed(0)}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          disabled={busyId === order.id}
+                          onClick={() => void handleConfirmOrder(order.id)}
+                          className="flex-1 min-h-[44px] rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                        >
+                          {busyId === order.id ? 'Dispatching...' : 'Confirm & Send to Kitchen'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busyId === order.id}
+                          onClick={() => void handleRejectPendingOrder(order.id)}
+                          className="min-h-[44px] rounded-xl border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs font-semibold text-red-700 dark:text-red-300 hover:bg-red-100 disabled:opacity-50"
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
             {snapshot.tables.length === 0 ? (
               <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-8 text-center text-sm text-slate-500 dark:text-slate-400">
                 No tables currently assigned to your profile. Ask your floor manager to assign tables.
@@ -310,6 +445,7 @@ export const WaiterPortal: React.FC<WaiterPortalProps> = ({
                   const sessionOrders = session
                     ? snapshot.orders.filter((o) => o.sessionId === session.id)
                     : [];
+                  const pendingForTable = sessionOrders.filter((o) => o.status === 'Submitted');
                   const total = sessionOrders.reduce((s, o) => s + o.totalAmount, 0);
                   const hasReady = snapshot.tickets.some(
                     (t) =>
@@ -325,9 +461,16 @@ export const WaiterPortal: React.FC<WaiterPortalProps> = ({
                       <div>
                         <div className="flex items-start justify-between gap-2">
                           <div>
-                            <h3 className="font-display text-lg font-bold text-slate-900 dark:text-slate-100">
-                              Table {table.tableNumber}
-                            </h3>
+                            <div className="flex items-center gap-2">
+                              <h3 className="font-display text-lg font-bold text-slate-900 dark:text-slate-100">
+                                Table {table.tableNumber}
+                              </h3>
+                              {pendingForTable.length > 0 && (
+                                <span className="rounded-full bg-orange-600 px-2 py-0.5 text-[10px] font-bold text-white">
+                                  {pendingForTable.length} Confirm
+                                </span>
+                              )}
+                            </div>
                             <p className="text-xs text-slate-500 dark:text-slate-400">
                               {table.floor} · {table.section} · {table.capacity} seats
                             </p>
@@ -421,6 +564,42 @@ export const WaiterPortal: React.FC<WaiterPortalProps> = ({
                   );
                 })}
               </div>
+            )}
+
+            {activeFloorOrders.length > 0 && (
+              <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-3">
+                <h3 className="font-display text-sm font-bold text-slate-900 dark:text-slate-100">
+                  Live Floor Order Tracker ({activeFloorOrders.length})
+                </h3>
+                <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {activeFloorOrders.map((ord) => (
+                    <div key={ord.id} className="py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <div className="min-w-0">
+                        <span className="font-mono font-bold text-slate-900 dark:text-slate-100">
+                          {ord.orderNumber}
+                        </span>
+                        <span className="ml-2 font-medium text-slate-600 dark:text-slate-300">
+                          Table {ord.tableNumber || '-'}
+                        </span>
+                        <span className="ml-2 text-slate-500 dark:text-slate-400">
+                          · {ord.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}
+                        </span>
+                      </div>
+                      <span
+                        className={`font-semibold px-2.5 py-0.5 rounded-full text-[11px] ${
+                          ord.status === 'Submitted'
+                            ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300'
+                            : ord.status === 'Ready' || ord.status === 'Served'
+                            ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300'
+                            : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200'
+                        }`}
+                      >
+                        {ord.status}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </section>
             )}
           </div>
         )}
@@ -866,7 +1045,7 @@ export const WaiterPortal: React.FC<WaiterPortalProps> = ({
         <div className="mx-auto grid max-w-2xl grid-cols-5 h-16 items-center">
           {(
             [
-              ['tables', 'Tables', Utensils, 0],
+              ['tables', 'Tables', Utensils, pendingConfirmationOrders.length],
               ['verify', 'Verify', UserCheck, pendingVerifications.length],
               ['service', 'Service', Bell, readyTickets.length + activeServiceRequests.length],
               ['order', 'Order', ClipboardCheck, 0],

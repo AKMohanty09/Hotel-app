@@ -19,7 +19,11 @@ test('waiter and kitchen permissions are strictly restricted', () => {
   assert.equal(canAccessPortal('waiter', 'manager'), false);
   assert.equal(hasPermission('waiter', 'issue_refund'), false);
   assert.equal(hasPermission('waiter', 'adjust_paid_bill'), false);
+  assert.equal(hasPermission('waiter', 'confirm_table_order'), true);
+  assert.equal(hasPermission('kitchen_staff', 'confirm_table_order'), false);
+  assert.equal(hasPermission('cashier', 'confirm_table_order'), false);
   assert.equal(hasPermission('manager', 'manage_tables'), true);
+  assert.equal(hasPermission('manager', 'confirm_table_order'), true);
 });
 
 test('waiter sees only assigned tables unless granted view_all_tables', () => {

@@ -489,6 +489,185 @@ CREATE POLICY "Public Read Restaurant Media"
   ON storage.objects
   FOR SELECT
   USING (bucket_id = 'restaurant-media');
+
+DO $$
+DECLARE
+  tbl TEXT;
+  rt_tables TEXT[] := ARRAY[
+    'restaurant_settings',
+    'staff_profiles',
+    'staff_shifts',
+    'restaurant_tables',
+    'table_verifications',
+    'table_sessions',
+    'menu_categories',
+    'kitchen_stations',
+    'menu_items',
+    'orders',
+    'kitchen_tickets',
+    'service_requests',
+    'bills',
+    'payments',
+    'inventory_items',
+    'online_platforms',
+    'integration_events',
+    'app_notifications',
+    'restaurant_reviews'
+  ];
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    FOREACH tbl IN ARRAY rt_tables LOOP
+      BEGIN
+        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE public.%I', tbl);
+      EXCEPTION
+        WHEN duplicate_object THEN NULL;
+        WHEN OTHERS THEN NULL;
+      END;
+    END LOOP;
+  END IF;
+END $$;
+
+DROP POLICY IF EXISTS "Public Read Active Menu Categories" ON public.menu_categories;
+CREATE POLICY "Public Read Active Menu Categories"
+  ON public.menu_categories FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Public Read Active Kitchen Stations" ON public.kitchen_stations;
+CREATE POLICY "Public Read Active Kitchen Stations"
+  ON public.kitchen_stations FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Public Read Menu Items" ON public.menu_items;
+CREATE POLICY "Public Read Menu Items"
+  ON public.menu_items FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Staff Scoped Read Settings" ON public.restaurant_settings;
+CREATE POLICY "Staff Scoped Read Settings"
+  ON public.restaurant_settings FOR SELECT
+  USING ((auth.jwt() ->> 'app_scope') = 'staff');
+
+DROP POLICY IF EXISTS "Manager Read Staff Profiles" ON public.staff_profiles;
+CREATE POLICY "Manager Read Staff Profiles"
+  ON public.staff_profiles FOR SELECT
+  USING (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    AND (
+      (auth.jwt() ->> 'staff_role') IN ('owner', 'manager', 'shift_supervisor')
+      OR id = (auth.jwt() ->> 'staff_id')
+    )
+  );
+
+DROP POLICY IF EXISTS "Staff Scoped Read Shifts" ON public.staff_shifts;
+CREATE POLICY "Staff Scoped Read Shifts"
+  ON public.staff_shifts FOR SELECT
+  USING ((auth.jwt() ->> 'app_scope') = 'staff');
+
+DROP POLICY IF EXISTS "Scoped Read Restaurant Tables" ON public.restaurant_tables;
+CREATE POLICY "Scoped Read Restaurant Tables"
+  ON public.restaurant_tables FOR SELECT
+  USING (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    OR (
+      (auth.jwt() ->> 'app_scope') = 'customer'
+      AND id = (auth.jwt() ->> 'table_id')
+    )
+  );
+
+DROP POLICY IF EXISTS "Scoped Read Table Verifications" ON public.table_verifications;
+CREATE POLICY "Scoped Read Table Verifications"
+  ON public.table_verifications FOR SELECT
+  USING (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    OR (
+      (auth.jwt() ->> 'app_scope') = 'customer'
+      AND table_id = (auth.jwt() ->> 'table_id')
+    )
+  );
+
+DROP POLICY IF EXISTS "Scoped Read Table Sessions" ON public.table_sessions;
+CREATE POLICY "Scoped Read Table Sessions"
+  ON public.table_sessions FOR SELECT
+  USING (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    OR (
+      (auth.jwt() ->> 'app_scope') = 'customer'
+      AND table_id = (auth.jwt() ->> 'table_id')
+    )
+  );
+
+DROP POLICY IF EXISTS "Scoped Read Orders" ON public.orders;
+CREATE POLICY "Scoped Read Orders"
+  ON public.orders FOR SELECT
+  USING (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    OR (
+      (auth.jwt() ->> 'app_scope') = 'customer'
+      AND table_id = (auth.jwt() ->> 'table_id')
+    )
+  );
+
+DROP POLICY IF EXISTS "Staff Scoped Read Kitchen Tickets" ON public.kitchen_tickets;
+CREATE POLICY "Staff Scoped Read Kitchen Tickets"
+  ON public.kitchen_tickets FOR SELECT
+  USING ((auth.jwt() ->> 'app_scope') = 'staff');
+
+DROP POLICY IF EXISTS "Scoped Read Service Requests" ON public.service_requests;
+CREATE POLICY "Scoped Read Service Requests"
+  ON public.service_requests FOR SELECT
+  USING (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    OR (
+      (auth.jwt() ->> 'app_scope') = 'customer'
+      AND table_id = (auth.jwt() ->> 'table_id')
+    )
+  );
+
+DROP POLICY IF EXISTS "Scoped Read Bills" ON public.bills;
+CREATE POLICY "Scoped Read Bills"
+  ON public.bills FOR SELECT
+  USING (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    OR (
+      (auth.jwt() ->> 'app_scope') = 'customer'
+      AND table_id = (auth.jwt() ->> 'table_id')
+    )
+  );
+
+DROP POLICY IF EXISTS "Staff Scoped Read Payments" ON public.payments;
+CREATE POLICY "Staff Scoped Read Payments"
+  ON public.payments FOR SELECT
+  USING ((auth.jwt() ->> 'app_scope') = 'staff');
+
+DROP POLICY IF EXISTS "Staff Scoped Read Inventory" ON public.inventory_items;
+CREATE POLICY "Staff Scoped Read Inventory"
+  ON public.inventory_items FOR SELECT
+  USING ((auth.jwt() ->> 'app_scope') = 'staff');
+
+DROP POLICY IF EXISTS "Staff Scoped Read Online Platforms" ON public.online_platforms;
+CREATE POLICY "Staff Scoped Read Online Platforms"
+  ON public.online_platforms FOR SELECT
+  USING ((auth.jwt() ->> 'app_scope') = 'staff');
+
+DROP POLICY IF EXISTS "Staff Scoped Read Integration Events" ON public.integration_events;
+CREATE POLICY "Staff Scoped Read Integration Events"
+  ON public.integration_events FOR SELECT
+  USING ((auth.jwt() ->> 'app_scope') = 'staff');
+
+DROP POLICY IF EXISTS "Staff Scoped Read Notifications" ON public.app_notifications;
+CREATE POLICY "Staff Scoped Read Notifications"
+  ON public.app_notifications FOR SELECT
+  USING ((auth.jwt() ->> 'app_scope') = 'staff');
+
+DROP POLICY IF EXISTS "Manager Scoped Read Audit Logs" ON public.audit_logs;
+CREATE POLICY "Manager Scoped Read Audit Logs"
+  ON public.audit_logs FOR SELECT
+  USING (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    AND (auth.jwt() ->> 'staff_role') IN ('owner', 'manager')
+  );
+
+DROP POLICY IF EXISTS "Staff Scoped Read Reviews" ON public.restaurant_reviews;
+CREATE POLICY "Staff Scoped Read Reviews"
+  ON public.restaurant_reviews FOR SELECT
+  USING ((auth.jwt() ->> 'app_scope') = 'staff');
 `;
 
 export function getFullSupabaseSchemaSql(): string {

@@ -25,6 +25,7 @@ export type Permission =
   | 'adjust_paid_bill'
   | 'access_kitchen_kds'
   | 'update_kitchen_ticket'
+  | 'confirm_table_order'
   | 'cancel_order';
 
 export const ROLE_PERMISSIONS: Record<StaffRole, Permission[]> = {
@@ -53,6 +54,7 @@ export const ROLE_PERMISSIONS: Record<StaffRole, Permission[]> = {
     'adjust_paid_bill',
     'access_kitchen_kds',
     'update_kitchen_ticket',
+    'confirm_table_order',
     'cancel_order',
   ],
   manager: [
@@ -79,6 +81,7 @@ export const ROLE_PERMISSIONS: Record<StaffRole, Permission[]> = {
     'adjust_paid_bill',
     'access_kitchen_kds',
     'update_kitchen_ticket',
+    'confirm_table_order',
     'cancel_order',
   ],
   shift_supervisor: [
@@ -92,6 +95,7 @@ export const ROLE_PERMISSIONS: Record<StaffRole, Permission[]> = {
     'record_payment',
     'apply_discount',
     'access_kitchen_kds',
+    'confirm_table_order',
     'cancel_order',
   ],
   waiter: [
@@ -101,6 +105,7 @@ export const ROLE_PERMISSIONS: Record<StaffRole, Permission[]> = {
     'handle_service_requests',
     'generate_bill',
     'record_payment',
+    'confirm_table_order',
   ],
   cashier: [
     'view_all_tables',

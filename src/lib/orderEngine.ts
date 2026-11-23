@@ -10,7 +10,11 @@ import type {
   OrderPriority,
   OrderStatus,
   RestaurantSettings,
+  RestaurantTable,
+  StaffProfile,
+  TableSession,
 } from '../types/domain';
+import { hasPermission } from './permissions';
 
 export interface RequestedOrderItemInput {
   menuItemId: string;
@@ -214,6 +218,9 @@ export function deriveOrderStatusFromTickets(
   if (activeTickets.length === 0) return currentStatus;
 
   const statuses = activeTickets.map((t) => t.status);
+  if (statuses.every((s) => s === 'completed')) {
+    return 'Completed';
+  }
   if (statuses.every((s) => s === 'picked_up')) {
     return channel === 'swiggy' || channel === 'zomato' || channel === 'takeaway' || channel === 'direct_online'
       ? 'Picked Up'
@@ -222,13 +229,17 @@ export function deriveOrderStatusFromTickets(
   if (statuses.every((s) => s === 'packed')) {
     return 'Packed';
   }
-  if (statuses.every((s) => s === 'served')) {
+  if (statuses.every((s) => s === 'served' || s === 'completed')) {
     return 'Served';
   }
-  if (statuses.every((s) => s === 'ready' || s === 'served' || s === 'packed' || s === 'picked_up')) {
+  if (
+    statuses.every(
+      (s) => s === 'ready' || s === 'served' || s === 'packed' || s === 'picked_up' || s === 'completed'
+    )
+  ) {
     return 'Ready';
   }
-  if (statuses.some((s) => s === 'ready' || s === 'served')) {
+  if (statuses.some((s) => s === 'ready' || s === 'served' || s === 'completed')) {
     return 'Partially Ready';
   }
   if (statuses.some((s) => s === 'preparing' || s === 'delayed')) {
@@ -239,3 +250,45 @@ export function deriveOrderStatusFromTickets(
   }
   return 'Submitted';
 }
+
+export function canStaffConfirmTableOrder(
+  order: Pick<Order, 'id' | 'orderNumber' | 'status' | 'tableId' | 'waiterId' | 'channel'>,
+  table: Pick<RestaurantTable, 'id' | 'assignedWaiterId'> | undefined,
+  session: Pick<TableSession, 'id' | 'waiterId'> | undefined,
+  staff: Pick<StaffProfile, 'id' | 'uid' | 'role' | 'assignedTableIds'>
+): { allowed: boolean; reason?: string } {
+  if (!hasPermission(staff.role, 'confirm_table_order')) {
+    return {
+      allowed: false,
+      reason: `Role "${staff.role}" cannot confirm incoming table orders.`,
+    };
+  }
+  if (order.status === 'Cancelled') {
+    return { allowed: false, reason: `Order ${order.orderNumber} was cancelled.` };
+  }
+  if (order.status !== 'Submitted') {
+    return {
+      allowed: false,
+      reason: `Order ${order.orderNumber} is already ${order.status}.`,
+    };
+  }
+  if (hasPermission(staff.role, 'view_all_tables')) {
+    return { allowed: true };
+  }
+  const isAssignedToTable = Boolean(
+    (order.tableId && staff.assignedTableIds.includes(order.tableId)) ||
+      (table && (table.assignedWaiterId === staff.id || table.assignedWaiterId === staff.uid)) ||
+      order.waiterId === staff.id ||
+      order.waiterId === staff.uid ||
+      session?.waiterId === staff.id ||
+      session?.waiterId === staff.uid
+  );
+  if (!isAssignedToTable) {
+    return {
+      allowed: false,
+      reason: 'Only the waiter assigned to this table (or a manager/supervisor) can confirm and send this order to the kitchen.',
+    };
+  }
+  return { allowed: true };
+}
+

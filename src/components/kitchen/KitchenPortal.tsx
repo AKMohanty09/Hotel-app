@@ -11,11 +11,14 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { api } from '../../services/api';
+import { applyOptimisticTicketStatus } from '../../lib/realtimeEvents';
 import type { KitchenTicket, RestaurantSnapshot, TicketStatus } from '../../types/domain';
 
 interface KitchenPortalProps {
   snapshot: RestaurantSnapshot;
   onRefresh: () => Promise<void>;
+  onOptimisticUpdate?: (updater: (prev: RestaurantSnapshot) => RestaurantSnapshot) => () => void;
+  onErrorToast?: (msg: string) => void;
 }
 
 function playKitchenChime() {
@@ -38,7 +41,12 @@ function playKitchenChime() {
   }
 }
 
-export const KitchenPortal: React.FC<KitchenPortalProps> = ({ snapshot, onRefresh }) => {
+export const KitchenPortal: React.FC<KitchenPortalProps> = ({
+  snapshot,
+  onRefresh,
+  onOptimisticUpdate,
+  onErrorToast,
+}) => {
   const [stationFilter, setStationFilter] = useState<string>('all');
   const [showHistory, setShowHistory] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -47,6 +55,7 @@ export const KitchenPortal: React.FC<KitchenPortalProps> = ({ snapshot, onRefres
   const [delayModalTicket, setDelayModalTicket] = useState<KitchenTicket | null>(null);
   const [delayReason, setDelayReason] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState('');
 
   const prevNewCountRef = useRef<number>(
     snapshot.tickets.filter((t) => t.status === 'new').length
@@ -83,11 +92,23 @@ export const KitchenPortal: React.FC<KitchenPortalProps> = ({ snapshot, onRefres
 
   const historyTickets = useMemo(
     () =>
-      filteredTickets.filter(
-        (t) => t.status === 'served' || t.status === 'picked_up' || t.status === 'cancelled'
-      ),
+      filteredTickets
+        .filter(
+          (t) =>
+            t.status === 'completed' ||
+            t.status === 'served' ||
+            t.status === 'picked_up' ||
+            t.status === 'cancelled'
+        )
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
     [filteredTickets]
   );
+
+  const surfaceError = (msg: string) => {
+    setErrorMsg(msg);
+    onErrorToast?.(msg);
+    window.setTimeout(() => setErrorMsg(''), 5000);
+  };
 
   const handleTicketAction = async (
     ticket: KitchenTicket,
@@ -95,9 +116,17 @@ export const KitchenPortal: React.FC<KitchenPortalProps> = ({ snapshot, onRefres
     toggleItemId?: string
   ) => {
     setBusyId(ticket.id);
+    setErrorMsg('');
+    const rollback =
+      status && onOptimisticUpdate
+        ? onOptimisticUpdate((prev) => applyOptimisticTicketStatus(prev, ticket.id, status))
+        : undefined;
     try {
       await api.updateKitchenTicket(ticket.id, { status, toggleItemId });
       await onRefresh();
+    } catch (err) {
+      rollback?.();
+      surfaceError(err instanceof Error ? err.message : 'Unable to update kitchen ticket.');
     } finally {
       setBusyId(null);
     }
@@ -106,15 +135,24 @@ export const KitchenPortal: React.FC<KitchenPortalProps> = ({ snapshot, onRefres
   const handleSubmitDelay = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!delayModalTicket || !delayReason.trim()) return;
-    setBusyId(delayModalTicket.id);
+    const targetTicket = delayModalTicket;
+    const reason = delayReason.trim();
+    setBusyId(targetTicket.id);
+    setErrorMsg('');
+    const rollback = onOptimisticUpdate
+      ? onOptimisticUpdate((prev) => applyOptimisticTicketStatus(prev, targetTicket.id, 'delayed'))
+      : undefined;
     try {
-      await api.updateKitchenTicket(delayModalTicket.id, {
+      await api.updateKitchenTicket(targetTicket.id, {
         status: 'delayed',
-        delayReason: delayReason.trim(),
+        delayReason: reason,
       });
       setDelayModalTicket(null);
       setDelayReason('');
       await onRefresh();
+    } catch (err) {
+      rollback?.();
+      surfaceError(err instanceof Error ? err.message : 'Unable to report kitchen delay.');
     } finally {
       setBusyId(null);
     }
@@ -268,6 +306,17 @@ export const KitchenPortal: React.FC<KitchenPortalProps> = ({ snapshot, onRefres
               Mark Packed
             </button>
           )}
+          {ticket.status === 'ready' && !isDelivery && (
+            <button
+              type="button"
+              disabled={busyId === ticket.id}
+              onClick={() => void handleTicketAction(ticket, 'completed')}
+              className="flex-1 min-h-[44px] inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-700 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-600"
+            >
+              <Check className="h-4 w-4" />
+              Complete &amp; Move to History
+            </button>
+          )}
           {ticket.status === 'packed' && (
             <button
               type="button"
@@ -351,6 +400,15 @@ export const KitchenPortal: React.FC<KitchenPortalProps> = ({ snapshot, onRefres
         </div>
       </div>
 
+      {errorMsg && (
+        <div
+          role="alert"
+          className="rounded-xl border border-red-500/60 bg-red-950/70 px-4 py-2.5 text-xs font-medium text-red-200"
+        >
+          {errorMsg}
+        </div>
+      )}
+
       {!showHistory ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {(
@@ -385,22 +443,28 @@ export const KitchenPortal: React.FC<KitchenPortalProps> = ({ snapshot, onRefres
           <h2 className="font-display text-base font-bold text-white mb-4">
             Completed &amp; Served Tickets
           </h2>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {historyTickets.map((t) => (
-              <div key={t.id} className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-xs space-y-1">
-                <div className="flex justify-between font-mono font-bold text-slate-200">
-                  <span>{t.orderNumber}</span>
-                  <span className="uppercase text-emerald-400">{t.status}</span>
+          {historyTickets.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-slate-800 p-6 text-center text-xs text-slate-400">
+              No completed or served tickets yet.
+            </div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {historyTickets.map((t) => (
+                <div key={t.id} className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-xs space-y-1">
+                  <div className="flex justify-between font-mono font-bold text-slate-200">
+                    <span>{t.orderNumber}</span>
+                    <span className="uppercase text-emerald-400">{t.status}</span>
+                  </div>
+                  <div className="text-slate-400">
+                    {t.stationName} · {t.tableNumber ? `Table ${t.tableNumber}` : t.channel}
+                  </div>
+                  <div className="text-slate-300 pt-1">
+                    {t.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}
+                  </div>
                 </div>
-                <div className="text-slate-400">
-                  {t.stationName} · {t.tableNumber || t.channel}
-                </div>
-                <div className="text-slate-300 pt-1">
-                  {t.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

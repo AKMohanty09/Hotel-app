@@ -494,3 +494,187 @@ create policy "Public Read Restaurant Media"
   on storage.objects
   for select
   using (bucket_id = 'restaurant-media');
+
+-- 12. Supabase Realtime Publication (Idempotent across existing databases)
+do $$
+declare
+  tbl text;
+  rt_tables text[] := array[
+    'restaurant_settings',
+    'staff_profiles',
+    'staff_shifts',
+    'restaurant_tables',
+    'table_verifications',
+    'table_sessions',
+    'menu_categories',
+    'kitchen_stations',
+    'menu_items',
+    'orders',
+    'kitchen_tickets',
+    'service_requests',
+    'bills',
+    'payments',
+    'inventory_items',
+    'online_platforms',
+    'integration_events',
+    'app_notifications',
+    'restaurant_reviews'
+  ];
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    foreach tbl in array rt_tables loop
+      begin
+        execute format('alter publication supabase_realtime add table public.%I', tbl);
+      exception
+        when duplicate_object then null;
+        when others then null;
+      end;
+    end loop;
+  end if;
+end $$;
+
+-- 13. Scoped RLS SELECT Policies for Realtime Subscriptions
+-- Note: staff_credentials, auth_sessions, system_flags, otp_challenges, and otp_rate_limits
+-- intentionally have NO public/JWT policies and remain service_role only.
+
+drop policy if exists "Public Read Active Menu Categories" on public.menu_categories;
+create policy "Public Read Active Menu Categories"
+  on public.menu_categories for select using (true);
+
+drop policy if exists "Public Read Active Kitchen Stations" on public.kitchen_stations;
+create policy "Public Read Active Kitchen Stations"
+  on public.kitchen_stations for select using (true);
+
+drop policy if exists "Public Read Menu Items" on public.menu_items;
+create policy "Public Read Menu Items"
+  on public.menu_items for select using (true);
+
+drop policy if exists "Staff Scoped Read Settings" on public.restaurant_settings;
+create policy "Staff Scoped Read Settings"
+  on public.restaurant_settings for select
+  using ((auth.jwt() ->> 'app_scope') = 'staff');
+
+drop policy if exists "Manager Read Staff Profiles" on public.staff_profiles;
+create policy "Manager Read Staff Profiles"
+  on public.staff_profiles for select
+  using (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    and (
+      (auth.jwt() ->> 'staff_role') in ('owner', 'manager', 'shift_supervisor')
+      or id = (auth.jwt() ->> 'staff_id')
+    )
+  );
+
+drop policy if exists "Staff Scoped Read Shifts" on public.staff_shifts;
+create policy "Staff Scoped Read Shifts"
+  on public.staff_shifts for select
+  using ((auth.jwt() ->> 'app_scope') = 'staff');
+
+drop policy if exists "Scoped Read Restaurant Tables" on public.restaurant_tables;
+create policy "Scoped Read Restaurant Tables"
+  on public.restaurant_tables for select
+  using (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    or (
+      (auth.jwt() ->> 'app_scope') = 'customer'
+      and id = (auth.jwt() ->> 'table_id')
+    )
+  );
+
+drop policy if exists "Scoped Read Table Verifications" on public.table_verifications;
+create policy "Scoped Read Table Verifications"
+  on public.table_verifications for select
+  using (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    or (
+      (auth.jwt() ->> 'app_scope') = 'customer'
+      and table_id = (auth.jwt() ->> 'table_id')
+    )
+  );
+
+drop policy if exists "Scoped Read Table Sessions" on public.table_sessions;
+create policy "Scoped Read Table Sessions"
+  on public.table_sessions for select
+  using (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    or (
+      (auth.jwt() ->> 'app_scope') = 'customer'
+      and table_id = (auth.jwt() ->> 'table_id')
+    )
+  );
+
+drop policy if exists "Scoped Read Orders" on public.orders;
+create policy "Scoped Read Orders"
+  on public.orders for select
+  using (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    or (
+      (auth.jwt() ->> 'app_scope') = 'customer'
+      and table_id = (auth.jwt() ->> 'table_id')
+    )
+  );
+
+drop policy if exists "Staff Scoped Read Kitchen Tickets" on public.kitchen_tickets;
+create policy "Staff Scoped Read Kitchen Tickets"
+  on public.kitchen_tickets for select
+  using ((auth.jwt() ->> 'app_scope') = 'staff');
+
+drop policy if exists "Scoped Read Service Requests" on public.service_requests;
+create policy "Scoped Read Service Requests"
+  on public.service_requests for select
+  using (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    or (
+      (auth.jwt() ->> 'app_scope') = 'customer'
+      and table_id = (auth.jwt() ->> 'table_id')
+    )
+  );
+
+drop policy if exists "Scoped Read Bills" on public.bills;
+create policy "Scoped Read Bills"
+  on public.bills for select
+  using (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    or (
+      (auth.jwt() ->> 'app_scope') = 'customer'
+      and table_id = (auth.jwt() ->> 'table_id')
+    )
+  );
+
+drop policy if exists "Staff Scoped Read Payments" on public.payments;
+create policy "Staff Scoped Read Payments"
+  on public.payments for select
+  using ((auth.jwt() ->> 'app_scope') = 'staff');
+
+drop policy if exists "Staff Scoped Read Inventory" on public.inventory_items;
+create policy "Staff Scoped Read Inventory"
+  on public.inventory_items for select
+  using ((auth.jwt() ->> 'app_scope') = 'staff');
+
+drop policy if exists "Staff Scoped Read Online Platforms" on public.online_platforms;
+create policy "Staff Scoped Read Online Platforms"
+  on public.online_platforms for select
+  using ((auth.jwt() ->> 'app_scope') = 'staff');
+
+drop policy if exists "Staff Scoped Read Integration Events" on public.integration_events;
+create policy "Staff Scoped Read Integration Events"
+  on public.integration_events for select
+  using ((auth.jwt() ->> 'app_scope') = 'staff');
+
+drop policy if exists "Staff Scoped Read Notifications" on public.app_notifications;
+create policy "Staff Scoped Read Notifications"
+  on public.app_notifications for select
+  using ((auth.jwt() ->> 'app_scope') = 'staff');
+
+drop policy if exists "Manager Scoped Read Audit Logs" on public.audit_logs;
+create policy "Manager Scoped Read Audit Logs"
+  on public.audit_logs for select
+  using (
+    (auth.jwt() ->> 'app_scope') = 'staff'
+    and (auth.jwt() ->> 'staff_role') in ('owner', 'manager')
+  );
+
+drop policy if exists "Staff Scoped Read Reviews" on public.restaurant_reviews;
+create policy "Staff Scoped Read Reviews"
+  on public.restaurant_reviews for select
+  using ((auth.jwt() ->> 'app_scope') = 'staff');

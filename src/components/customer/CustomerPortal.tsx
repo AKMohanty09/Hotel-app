@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { api, type CustomerTableBootstrap } from '../../services/api';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
+import type { RealtimeConnectionStatus } from '../../lib/realtimeEvents';
 import type {
   CustomerServiceRequest,
   MenuItem,
@@ -30,6 +31,7 @@ import type {
 } from '../../types/domain';
 import { downloadBillPdf } from '../../lib/exportUtils';
 import { CustomerMenuSkeleton } from '../common/Skeleton';
+import { RealtimeStatusBadge } from '../common/RealtimeWidgets';
 
 interface CartLine {
   key: string;
@@ -120,6 +122,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   const [serviceRating, setServiceRating] = useState(5);
   const [reviewComment, setReviewComment] = useState('');
   const [reviewSubmitted, setReviewSubmitted] = useState(false);
+  const [realtimeStatus, setRealtimeStatus] = useState<RealtimeConnectionStatus>('reconnecting');
 
   const loadBootstrap = useCallback(async () => {
     try {
@@ -167,9 +170,21 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
     void loadBootstrap();
   }, [loadBootstrap]);
 
-  useRealtimeSync(() => {
-    void loadBootstrap();
-  }, true);
+  useRealtimeSync(
+    useCallback(() => {
+      void loadBootstrap();
+    }, [loadBootstrap]),
+    {
+      enabled: true,
+      qrToken,
+      scope: {
+        portal: 'customer',
+        tableId: data?.table.id,
+        sessionId: sessionId || data?.activeSession?.id,
+      },
+      onStatusChange: setRealtimeStatus,
+    }
+  );
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -350,7 +365,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
       setCart([]);
       setCartOpen(false);
       setActiveTab('orders');
-      showToast(`Order ${res.order.orderNumber} sent to the kitchen!`);
+      showToast(`Order ${res.order.orderNumber} sent to your waiter for confirmation!`);
       await loadBootstrap();
     } catch (err) {
       setVerifyError(err instanceof Error ? err.message : 'Order failed');
@@ -498,6 +513,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <RealtimeStatusBadge status={realtimeStatus} />
             {onToggleTheme && (
               <button
                 type="button"
@@ -837,9 +853,18 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                       </span>
                     </div>
                     <span className="text-xs font-semibold text-orange-600 dark:text-orange-400">
-                      Status: {order.status}
+                      Status:{' '}
+                      {order.status === 'Submitted'
+                        ? 'Awaiting Waiter Confirmation'
+                        : order.status}
                     </span>
                   </div>
+
+                  {order.status === 'Submitted' && (
+                    <div className="mt-2.5 rounded-xl border border-amber-200 dark:border-amber-800/60 bg-amber-50/70 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+                      Waiting for {order.waiterName || 'your assigned waiter'} to confirm &amp; send to kitchen.
+                    </div>
+                  )}
 
                   {/* Visual Stage Progression */}
                   <div className="mt-3 grid grid-cols-6 gap-1 text-[11px] text-center">
@@ -857,7 +882,11 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                               }`}
                             />
                             <div className={`truncate ${done ? 'font-semibold text-slate-800 dark:text-slate-200' : 'text-slate-400 dark:text-slate-600'}`}>
-                              {stage === 'Partially Ready' ? 'Partial' : stage}
+                              {stage === 'Submitted'
+                                ? 'Waiter Check'
+                                : stage === 'Partially Ready'
+                                ? 'Partial'
+                                : stage}
                             </div>
                           </div>
                         );
@@ -1498,8 +1527,8 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
             >
               {isSessionActive
                 ? submittingOrder
-                  ? 'Sending to Kitchen...'
-                  : 'Submit Order to Kitchen'
+                  ? 'Sending to Waiter...'
+                  : 'Submit Order to Waiter'
                 : 'Verify Table to Submit Order'}
             </button>
           </div>

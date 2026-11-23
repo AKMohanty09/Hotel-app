@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
   CheckCheck,
@@ -11,14 +11,23 @@ import {
   QrCode,
   Sun,
   UserCheck,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
 import { api, setAuthToken } from './services/api';
 import { canAccessPortal, getDefaultPortalForRole } from './lib/permissions';
 import { useRealtimeSync } from './hooks/useRealtimeSync';
+import type { RealtimeConnectionStatus } from './lib/realtimeEvents';
 import type { PortalKey, RestaurantSnapshot, StaffProfile } from './types/domain';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { OfflineBanner, PWAInstallButton } from './components/common/PWAWidgets';
+import {
+  LiveAlertToaster,
+  playRealtimeChime,
+  RealtimeStatusBadge,
+  type LiveAlertItem,
+} from './components/common/RealtimeWidgets';
 import { ManagerDashboardSkeleton } from './components/common/Skeleton';
 import { StaffAvatar } from './components/common/StaffAvatar';
 import { uploadImageFileToDatabase } from './lib/imageUtils';
@@ -47,6 +56,12 @@ function AppShell() {
   const [snapshot, setSnapshot] = useState<RestaurantSnapshot | null>(null);
   const [loadingSnapshot, setLoadingSnapshot] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [realtimeStatus, setRealtimeStatus] = useState<RealtimeConnectionStatus>('reconnecting');
+  const [alerts, setAlerts] = useState<LiveAlertItem[]>([]);
+  const [muteChimes, setMuteChimes] = useState(false);
+  const prevSnapshotRef = useRef<RestaurantSnapshot | null>(null);
+  const snapshotRef = useRef<RestaurantSnapshot | null>(null);
+  snapshotRef.current = snapshot;
 
   // System-aware Theme & Manager Sidebar Drawers / Modals
   const [themeMode, setThemeMode] = useState<'system' | 'light' | 'dark'>(() => {
@@ -102,28 +117,189 @@ function AppShell() {
     }
   }, []);
 
-  const currentStaffId = currentStaff?.id ?? null;
+  const pushAlert = useCallback((item: Omit<LiveAlertItem, 'id' | 'createdAt'>) => {
+    const id = `al_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const next: LiveAlertItem = { ...item, id, createdAt: new Date().toISOString() };
+    setAlerts((prev) => [next, ...prev].slice(0, 4));
+    window.setTimeout(() => {
+      setAlerts((prev) => prev.filter((a) => a.id !== id));
+    }, 6000);
+  }, []);
 
-  const fetchSnapshot = useCallback(async () => {
-    if (!currentStaffId) return;
-    setLoadingSnapshot(true);
-    setLoadError('');
-    try {
-      const data = await api.getSnapshot();
-      setSnapshot(data);
-      syncDefaultThemeIfUnset(data.settings.defaultTheme);
-      const updatedMe = data.staff.find((s) => s.id === currentStaffId);
-      if (updatedMe) {
-        setCurrentStaff((prev) =>
-          prev && JSON.stringify(prev) === JSON.stringify(updatedMe) ? prev : updatedMe
-        );
+  const dismissAlert = useCallback((id: string) => {
+    setAlerts((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  const applyOptimisticUpdate = useCallback(
+    (updater: (prev: RestaurantSnapshot) => RestaurantSnapshot) => {
+      let rollbackSnapshot: RestaurantSnapshot | null = null;
+      setSnapshot((prev) => {
+        if (!prev) return prev;
+        rollbackSnapshot = prev;
+        return updater(prev);
+      });
+      return () => {
+        if (rollbackSnapshot) {
+          setSnapshot(rollbackSnapshot);
+        }
+      };
+    },
+    []
+  );
+
+  const currentStaffId = currentStaff?.id ?? null;
+  const effectivePortal = currentStaff
+    ? canAccessPortal(currentStaff.role, activePortal)
+      ? activePortal
+      : getDefaultPortalForRole(currentStaff.role)
+    : 'manager';
+  const effectivePortalRef = useRef<PortalKey>(effectivePortal);
+  effectivePortalRef.current = effectivePortal;
+  const currentStaffRef = useRef<StaffProfile | null>(currentStaff);
+  currentStaffRef.current = currentStaff;
+
+  const fetchSnapshot = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!currentStaffId) return;
+      const isInitialLoad = !options?.silent && !snapshotRef.current;
+      if (isInitialLoad) {
+        setLoadingSnapshot(true);
       }
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : 'Unable to load workspace snapshot.');
-    } finally {
-      setLoadingSnapshot(false);
-    }
-  }, [currentStaffId, syncDefaultThemeIfUnset]);
+      setLoadError('');
+      try {
+        const data = await api.getSnapshot();
+        const prev = prevSnapshotRef.current;
+        if (prev) {
+          const soundAllowed = data.settings.enableSoundAlerts !== false && !muteChimes;
+          const portal = effectivePortalRef.current;
+          const staff = currentStaffRef.current;
+          const waiterAssignedSet =
+            portal === 'waiter' && staff?.role === 'waiter'
+              ? new Set(staff.assignedTableIds || [])
+              : null;
+          const matchesWaiterTable = (tableId?: string) =>
+            !waiterAssignedSet || (Boolean(tableId) && waiterAssignedSet.has(tableId!));
+
+          if (portal !== 'kitchen') {
+            const newSubmitted = data.orders.filter(
+              (o) =>
+                o.status === 'Submitted' &&
+                Boolean(o.tableId) &&
+                matchesWaiterTable(o.tableId) &&
+                !prev.orders.some((po) => po.id === o.id)
+            );
+            if (newSubmitted.length > 0) {
+              const first = newSubmitted[0];
+              pushAlert({
+                title: 'Table Order Awaiting Confirmation',
+                message: `${first.orderNumber} (${first.tableNumber ? `Table ${first.tableNumber}` : 'Table'}) requires waiter confirmation.`,
+                tone: 'urgent',
+              });
+              if (soundAllowed) playRealtimeChime('order');
+            }
+
+            const newVerifs = data.verifications.filter(
+              (v) =>
+                v.status === 'pending' &&
+                matchesWaiterTable(v.tableId) &&
+                !prev.verifications.some((pv) => pv.id === v.id)
+            );
+            if (newVerifs.length > 0) {
+              const first = newVerifs[0];
+              pushAlert({
+                title: 'Guest Table Verification',
+                message: `Table ${first.tableNumber} requested physical presence verification.`,
+                tone: 'urgent',
+              });
+              if (soundAllowed) playRealtimeChime('urgent');
+            }
+
+            const newCalls = data.serviceRequests.filter(
+              (sr) =>
+                sr.status === 'New' &&
+                matchesWaiterTable(sr.tableId) &&
+                !prev.serviceRequests.some((ps) => ps.id === sr.id)
+            );
+            if (newCalls.length > 0) {
+              const first = newCalls[0];
+              pushAlert({
+                title: `Service Request · Table ${first.tableNumber}`,
+                message: `${first.requestType}${first.notes ? `: ${first.notes}` : ''}`,
+                tone: 'urgent',
+              });
+              if (soundAllowed) playRealtimeChime('urgent');
+            }
+
+            const newlyReady = data.tickets.filter((t) => {
+              if (t.status !== 'ready') return false;
+              if (prev.tickets.some((pt) => pt.id === t.id && pt.status === 'ready')) return false;
+              const parentOrder = data.orders.find((o) => o.id === t.orderId);
+              return matchesWaiterTable(parentOrder?.tableId);
+            });
+            if (newlyReady.length > 0) {
+              const first = newlyReady[0];
+              pushAlert({
+                title: 'Food Ready for Pickup',
+                message: `${first.orderNumber}${first.tableNumber ? ` · Table ${first.tableNumber}` : ''} (${first.stationName})`,
+                tone: 'success',
+              });
+              if (soundAllowed) playRealtimeChime('ready');
+            }
+          }
+
+          const newOnline = data.orders.filter(
+            (o) =>
+              (o.channel === 'swiggy' || o.channel === 'zomato') &&
+              !prev.orders.some((po) => po.id === o.id)
+          );
+          if (newOnline.length > 0 && portal !== 'waiter') {
+            const first = newOnline[0];
+            pushAlert({
+              title: `${first.channel.toUpperCase()} Order Received`,
+              message: `${first.orderNumber}${first.externalOrderId ? ` (${first.externalOrderId})` : ''} queued for kitchen.`,
+              tone: 'info',
+            });
+            if (soundAllowed) playRealtimeChime('order');
+          } else if (portal === 'kitchen') {
+            const newKitchenTickets = data.tickets.filter(
+              (t) =>
+                t.status === 'new' &&
+                !prev.tickets.some((pt) => pt.id === t.id)
+            );
+            if (newKitchenTickets.length > 0) {
+              const first = newKitchenTickets[0];
+              pushAlert({
+                title: 'New Kitchen Ticket',
+                message: `${first.orderNumber}${first.tableNumber ? ` · Table ${first.tableNumber}` : ''} (${first.stationName}) queued.`,
+                tone: 'urgent',
+              });
+              if (soundAllowed) playRealtimeChime('order');
+            }
+          }
+        }
+        prevSnapshotRef.current = data;
+        setSnapshot(data);
+        syncDefaultThemeIfUnset(data.settings.defaultTheme);
+        const updatedMe = data.staff.find((s) => s.id === currentStaffId);
+        if (updatedMe) {
+          setCurrentStaff((prevStaff) =>
+            prevStaff && JSON.stringify(prevStaff) === JSON.stringify(updatedMe)
+              ? prevStaff
+              : updatedMe
+          );
+        }
+      } catch (err) {
+        if (!snapshotRef.current) {
+          setLoadError(err instanceof Error ? err.message : 'Unable to load workspace snapshot.');
+        }
+      } finally {
+        setLoadingSnapshot(false);
+      }
+    },
+    [currentStaffId, muteChimes, pushAlert, syncDefaultThemeIfUnset]
+  );
+
+  const handleRefresh = useCallback(() => fetchSnapshot({ silent: true }), [fetchSnapshot]);
 
   useEffect(() => {
     if (currentStaffId && !customerQrToken) {
@@ -131,14 +307,23 @@ function AppShell() {
     }
   }, [currentStaffId, customerQrToken, fetchSnapshot]);
 
-  // Real-time WebSocket updates across all open terminals
+  // Dual-layer real-time updates (Supabase Realtime + WebSocket + reconnect catch-up)
   useRealtimeSync(
     useCallback(() => {
-      if (currentStaff && !customerQrToken) {
-        void fetchSnapshot();
+      if (currentStaffId && !customerQrToken) {
+        void fetchSnapshot({ silent: true });
       }
-    }, [currentStaff, customerQrToken, fetchSnapshot]),
-    Boolean(currentStaff && !customerQrToken)
+    }, [currentStaffId, customerQrToken, fetchSnapshot]),
+    {
+      enabled: Boolean(currentStaffId && !customerQrToken),
+      scope: {
+        portal: effectivePortal,
+        staffId: currentStaff?.id,
+        assignedTableIds: currentStaff?.assignedTableIds,
+        stationId: currentStaff?.kitchenStationId,
+      },
+      onStatusChange: setRealtimeStatus,
+    }
   );
 
   const openCustomerTableUrl = (qrToken: string) => {
@@ -171,6 +356,7 @@ function AppShell() {
     setAuthToken(null);
     setCurrentStaff(null);
     setSnapshot(null);
+    prevSnapshotRef.current = null;
   };
 
   // Customer QR Portal View (public menu browsing + waiter OTP gated ordering)
@@ -211,10 +397,6 @@ function AppShell() {
     { id: 'kitchen', label: 'Kitchen (KDS)', icon: ChefHat },
   ];
   const allowedPortals = portalTabs.filter((p) => canAccessPortal(currentStaff.role, p.id));
-
-  const effectivePortal = canAccessPortal(currentStaff.role, activePortal)
-    ? activePortal
-    : getDefaultPortalForRole(currentStaff.role);
 
   const firstActiveTableToken =
     snapshot?.tables.find((t) => !t.isArchived)?.qrToken || '';
@@ -289,7 +471,18 @@ function AppShell() {
 
         {/* Right Utility Actions */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          <RealtimeStatusBadge status={realtimeStatus} />
           <PWAInstallButton variant={resolvedTheme} />
+
+          <button
+            type="button"
+            aria-label={muteChimes ? 'Enable live alert sounds' : 'Mute live alert sounds'}
+            title={muteChimes ? 'Unmute live chimes' : 'Mute live chimes'}
+            onClick={() => setMuteChimes((m) => !m)}
+            className="hidden sm:inline-flex rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-2 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700"
+          >
+            {muteChimes ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+          </button>
 
           <button
             type="button"
@@ -358,19 +551,33 @@ function AppShell() {
             currentStaff={currentStaff}
             sidebarOpen={managerSidebarOpen}
             onCloseSidebar={() => setManagerSidebarOpen(false)}
-            onRefresh={fetchSnapshot}
+            onRefresh={handleRefresh}
+            onOptimisticUpdate={applyOptimisticUpdate}
+            onErrorToast={(msg) =>
+              pushAlert({ title: 'Update Reverted', message: msg, tone: 'urgent' })
+            }
             onOpenCustomerPreview={openCustomerTableUrl}
           />
         ) : effectivePortal === 'waiter' ? (
           <WaiterPortal
             snapshot={snapshot}
             currentStaff={currentStaff}
-            onRefresh={fetchSnapshot}
+            onRefresh={handleRefresh}
+            onOptimisticUpdate={applyOptimisticUpdate}
           />
         ) : (
-          <KitchenPortal snapshot={snapshot} onRefresh={fetchSnapshot} />
+          <KitchenPortal
+            snapshot={snapshot}
+            onRefresh={handleRefresh}
+            onOptimisticUpdate={applyOptimisticUpdate}
+            onErrorToast={(msg) =>
+              pushAlert({ title: 'Kitchen Action Failed', message: msg, tone: 'urgent' })
+            }
+          />
         )}
       </div>
+
+      <LiveAlertToaster alerts={alerts} onDismiss={dismissAlert} />
 
       {/* Notification Drawer */}
       {notifOpen && snapshot && (

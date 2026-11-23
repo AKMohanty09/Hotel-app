@@ -4,6 +4,8 @@ import crypto from 'node:crypto';
 import {
   createAuthSession,
   deleteAuthSession,
+  emitSupabaseRealtimeBroadcast,
+  getPublicSupabaseRealtimeConfig,
   getSnapshot,
   getStorageBackend,
   getUploadedMedia,
@@ -12,6 +14,7 @@ import {
   isSupabaseAnonKeyConfigured,
   isSupabaseRlsError,
   isSupabaseSchemaMissingError,
+  issueScopedRealtimeJwt,
   mutateSnapshot,
   registerInitialOwner,
   resolveAuthSession,
@@ -30,6 +33,7 @@ import {
 } from './otpService.ts';
 import { integrationAdapters } from './integrations.ts';
 import {
+  canStaffConfirmTableOrder,
   deriveOrderStatusFromTickets,
   splitOrderIntoKitchenTickets,
   validateAndPriceOrderItems,
@@ -192,16 +196,41 @@ function sanitizeSnapshotForRole(snap: RestaurantSnapshot, staff: StaffProfile):
     };
   }
 
-  if (isWaiter) {
+  if (isWaiter && !hasPermission(staff.role, 'view_all_tables')) {
+    const assignedTables = snap.tables.filter(
+      (t) =>
+        !t.isArchived &&
+        (t.assignedWaiterId === staff.id ||
+          t.assignedWaiterId === staff.uid ||
+          staff.assignedTableIds.includes(t.id))
+    );
+    const assignedIds = new Set(assignedTables.map((t) => t.id));
+    const scopedOrders = snap.orders.filter(
+      (o) =>
+        (o.tableId && assignedIds.has(o.tableId)) ||
+        o.waiterId === staff.id ||
+        o.waiterId === staff.uid
+    );
+    const scopedOrderIds = new Set(scopedOrders.map((o) => o.id));
+    const scopedBills = snap.bills.filter((b) => assignedIds.has(b.tableId));
+    const scopedBillIds = new Set(scopedBills.map((b) => b.id));
+
     return {
       ...snap,
-      tables: snap.tables.filter(
-        (t) =>
-          !t.isArchived &&
-          (t.assignedWaiterId === staff.id ||
-            t.assignedWaiterId === staff.uid ||
-            staff.assignedTableIds.includes(t.id))
+      tables: assignedTables,
+      verifications: snap.verifications.filter(
+        (v) => assignedIds.has(v.tableId) || v.waiterId === staff.id || v.waiterId === staff.uid
       ),
+      sessions: snap.sessions.filter(
+        (s) => assignedIds.has(s.tableId) || s.waiterId === staff.id || s.waiterId === staff.uid
+      ),
+      orders: scopedOrders,
+      tickets: snap.tickets.filter((tk) => scopedOrderIds.has(tk.orderId)),
+      serviceRequests: snap.serviceRequests.filter(
+        (sr) => assignedIds.has(sr.tableId) || sr.waiterId === staff.id || sr.waiterId === staff.uid
+      ),
+      bills: scopedBills,
+      payments: snap.payments.filter((p) => scopedBillIds.has(p.billId)),
       staff: snap.staff.map((s) =>
         s.id === staff.id ? s : { ...s, email: '', mobile: '' }
       ),
@@ -338,13 +367,90 @@ export function createApp(options?: {
   app.use(express.json({ limit: '5mb' }));
 
   const broadcastEvent = (type: string, payload: Record<string, unknown> = {}) => {
-    options?.onEvent?.(type, payload);
+    const enriched: Record<string, unknown> = {
+      ...payload,
+      eventId:
+        typeof payload.eventId === 'string'
+          ? payload.eventId
+          : `evt_${crypto.randomUUID().slice(0, 12)}`,
+      timestamp: new Date().toISOString(),
+    };
+    options?.onEvent?.(type, enriched);
+    void emitSupabaseRealtimeBroadcast(enriched);
   };
 
   const SUPABASE_SETUP_SQL = getFullSupabaseSchemaSql();
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, storage: getStorageBackend() });
+  });
+
+  app.get('/api/realtime/config', (_req, res) => {
+    const sbConfig = getPublicSupabaseRealtimeConfig();
+    res.json({
+      wsPath: '/ws',
+      supabase: sbConfig,
+    });
+  });
+
+  app.post('/api/realtime/token', async (req, res) => {
+    try {
+      const resolved = await resolveBearerStaff(req.headers.authorization);
+      if (resolved) {
+        const jwt = issueScopedRealtimeJwt({
+          app_scope: 'staff',
+          staff_id: resolved.staff.id,
+          staff_role: resolved.staff.role,
+        });
+        return res.json({
+          scope: 'staff',
+          token: jwt?.token || null,
+          expiresAt: jwt?.expiresAt || null,
+        });
+      }
+
+      const { qrToken, tableId, sessionId } = (req.body || {}) as {
+        qrToken?: string;
+        tableId?: string;
+        sessionId?: string;
+      };
+      if (!qrToken && !tableId && !sessionId) {
+        return res.status(401).json({ error: 'Authentication or active table QR context is required.' });
+      }
+      const snap = await getSnapshot();
+      const matchedTable = snap.tables.find(
+        (t) =>
+          !t.isArchived &&
+          !t.qrRevoked &&
+          ((qrToken && t.qrToken === qrToken) || (tableId && t.id === tableId))
+      );
+      const matchedSession = sessionId
+        ? snap.sessions.find(
+            (s) =>
+              s.id === sessionId &&
+              s.status !== 'closed' &&
+              (!matchedTable || s.tableId === matchedTable.id)
+          )
+        : undefined;
+      const resolvedTableId = matchedSession?.tableId || matchedTable?.id;
+      if (!resolvedTableId) {
+        return res.status(403).json({ error: 'Invalid or expired table QR context.' });
+      }
+
+      const jwt = issueScopedRealtimeJwt({
+        app_scope: 'customer',
+        table_id: resolvedTableId,
+        session_id: matchedSession?.id,
+      });
+      return res.json({
+        scope: 'customer',
+        tableId: resolvedTableId,
+        token: jwt?.token || null,
+        expiresAt: jwt?.expiresAt || null,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Unable to issue realtime token.' });
+    }
   });
 
   app.get('/api/setup/supabase-schema', (_req, res) => {
@@ -645,7 +751,12 @@ export function createApp(options?: {
         await updateStaffCredentialEmail(result.staff.id, result.staff.email, result.staff.employeeId);
       }
 
-      broadcastEvent('snapshot:updated', { reason: 'staff_profile_updated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'staff_profile_updated',
+        entity: 'staff',
+        action: 'update',
+        recordId: result.staff.id,
+      });
       res.json({ staff: result.staff });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to update profile.' });
@@ -883,7 +994,14 @@ export function createApp(options?: {
         throw innerErr;
       }
 
-      broadcastEvent('snapshot:updated', { reason: 'verification_requested' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'verification_requested',
+        entity: 'verification',
+        action: 'create',
+        recordId: verification.id,
+        tableId: verification.tableId,
+        waiterId: verification.waiterId,
+      });
       res.json({ verificationRequest: verification });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to start verification.' });
@@ -936,7 +1054,14 @@ export function createApp(options?: {
         return vr;
       });
 
-      broadcastEvent('snapshot:updated', { reason: 'verification_resent' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'verification_resent',
+        entity: 'verification',
+        action: 'update',
+        recordId: verification.id,
+        tableId: verification.tableId,
+        waiterId: verification.waiterId,
+      });
       res.json({ verificationRequest: verification });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to resend OTP.' });
@@ -1021,7 +1146,15 @@ export function createApp(options?: {
         return { session, verification: vr };
       });
 
-      broadcastEvent('snapshot:updated', { reason: 'session_verified' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'session_verified',
+        entity: 'verification',
+        action: 'update',
+        recordId: verifiedData.verification.id,
+        tableId: verifiedData.session.tableId,
+        sessionId: verifiedData.session.id,
+        waiterId: verifiedData.session.waiterId,
+      });
       res.json({
         session: verifiedData.session,
         verificationRequest: verifiedData.verification,
@@ -1088,7 +1221,7 @@ export function createApp(options?: {
           tableId: table.id,
           tableNumber: table.tableNumber,
           sessionId: session.id,
-          waiterId: waiter?.id,
+          waiterId: waiter?.id || table.assignedWaiterId || session.waiterId,
           waiterName: waiter?.name,
           status: 'Submitted',
           priority: table.tableType === 'vip' ? 'vip' : 'normal',
@@ -1105,6 +1238,9 @@ export function createApp(options?: {
               status: 'Submitted',
               actorId: 'guest',
               actorName: `Table ${table.tableNumber} Guest`,
+              note: waiter
+                ? `Awaiting confirmation by assigned waiter ${waiter.name}`
+                : 'Awaiting waiter confirmation before kitchen dispatch',
               timestamp: now,
             },
           ],
@@ -1112,47 +1248,45 @@ export function createApp(options?: {
           updatedAt: now,
         };
 
-        const tickets = splitOrderIntoKitchenTickets(order, snap.stations);
+        // Request A: Table QR orders await assigned waiter confirmation before creating KitchenTickets
         snap.orders.unshift(order);
-        snap.tickets.unshift(...tickets);
         table.status = 'Order Active';
         table.updatedAt = now;
 
         pushNotification(
           snap,
-          ['kitchen_staff', 'kitchen_supervisor', 'manager', 'owner'],
-          'info',
-          `New QR Order ${order.orderNumber}`,
-          `${table.tableNumber} submitted ${order.items.length} item(s). Routed to ${tickets.length} station(s).`,
-          'kitchen'
+          ['waiter', 'shift_supervisor', 'manager', 'owner'],
+          'urgent',
+          `Confirm Order ${order.orderNumber}: ${table.tableNumber}`,
+          `${table.tableNumber} placed ${order.items.length} item(s) (${snap.settings.currencySymbol}${order.totalAmount.toFixed(2)}). Confirm to send to kitchen.`,
+          'waiter',
+          'tables',
+          order.waiterId
         );
-        if (waiter) {
-          pushNotification(
-            snap,
-            ['waiter'],
-            'info',
-            `Table ${table.tableNumber} Ordered`,
-            `${order.orderNumber} (${snap.settings.currencySymbol}${order.totalAmount.toFixed(2)}) sent to kitchen.`,
-            'waiter',
-            'tables',
-            waiter.id
-          );
-        }
 
         appendAudit(
           snap,
           { id: 'guest', name: `Table ${table.tableNumber} Guest`, role: 'customer' },
-          'ORDER_SUBMITTED_QR',
+          'ORDER_SUBMITTED_QR_AWAITING_WAITER',
           'order',
           order.id,
           undefined,
-          { tableId: table.id, sessionId: session.id, totalAmount: order.totalAmount }
+          { tableId: table.id, sessionId: session.id, waiterId: order.waiterId || null, totalAmount: order.totalAmount }
         );
 
-        return { order, tickets };
+        return { order, tickets: [] as typeof snap.tickets };
       });
 
-      broadcastEvent('snapshot:updated', { reason: 'order_created', orderId: orderResult.order.id });
+      broadcastEvent('snapshot:updated', {
+        reason: 'order_submitted_for_confirmation',
+        entity: 'order',
+        action: 'create',
+        recordId: orderResult.order.id,
+        tableId: orderResult.order.tableId,
+        sessionId: orderResult.order.sessionId,
+        waiterId: orderResult.order.waiterId,
+        channel: orderResult.order.channel,
+      });
       res.status(201).json(orderResult);
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to submit order.' });
@@ -1223,7 +1357,15 @@ export function createApp(options?: {
         return sr;
       });
 
-      broadcastEvent('snapshot:updated', { reason: 'service_request_created' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'service_request_created',
+        entity: 'service_request',
+        action: 'create',
+        recordId: created.id,
+        tableId: created.tableId,
+        sessionId: created.sessionId,
+        waiterId: created.waiterId,
+      });
       res.status(201).json({ serviceRequest: created });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to send request.' });
@@ -1262,7 +1404,14 @@ export function createApp(options?: {
         }
         return consolidated;
       });
-      broadcastEvent('snapshot:updated', { reason: 'bill_generated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'bill_generated',
+        entity: 'bill',
+        action: 'create',
+        recordId: bill.id,
+        tableId: bill.tableId,
+        sessionId: bill.sessionId,
+      });
       res.json({ bill });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to generate bill.' });
@@ -1340,7 +1489,14 @@ export function createApp(options?: {
         return { bill: updatedBill, payment };
       });
 
-      broadcastEvent('snapshot:updated', { reason: 'payment_recorded' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'payment_recorded',
+        entity: 'payment',
+        action: 'create',
+        recordId: result.payment.id,
+        tableId: result.bill.tableId,
+        sessionId: result.bill.sessionId,
+      });
       res.json(result);
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Payment failed.' });
@@ -1375,7 +1531,13 @@ export function createApp(options?: {
         return entry;
       });
 
-      broadcastEvent('snapshot:updated', { reason: 'review_submitted' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'review_submitted',
+        entity: 'review',
+        action: 'create',
+        recordId: review.id,
+        sessionId: review.sessionId,
+      });
       res.status(201).json({ review });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to save review.' });
@@ -1454,7 +1616,14 @@ export function createApp(options?: {
         return created;
       });
 
-      broadcastEvent('snapshot:updated', { reason: 'table_created' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'table_created',
+        entity: 'table',
+        action: 'create',
+        recordId: table.id,
+        tableId: table.id,
+        waiterId: table.assignedWaiterId,
+      });
       res.status(201).json({ table });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to create table.' });
@@ -1473,6 +1642,15 @@ export function createApp(options?: {
       const updated = await mutateSnapshot((snap) => {
         const table = snap.tables.find((t) => t.id === id);
         if (!table) throw new Error('Table not found.');
+        if (
+          !isManager &&
+          !hasPermission(req.staff!.role, 'view_all_tables') &&
+          table.assignedWaiterId !== req.staff!.id &&
+          table.assignedWaiterId !== req.staff!.uid &&
+          !req.staff!.assignedTableIds.includes(table.id)
+        ) {
+          throw new Error('Forbidden: you are not assigned to this table.');
+        }
         const originalQrToken = table.qrToken;
         const now = new Date().toISOString();
 
@@ -1529,10 +1707,18 @@ export function createApp(options?: {
         return table;
       });
 
-      broadcastEvent('snapshot:updated', { reason: 'table_updated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'table_updated',
+        entity: 'table',
+        action: 'update',
+        recordId: updated.id,
+        tableId: updated.id,
+        waiterId: updated.assignedWaiterId,
+      });
       res.json({ table: updated });
     } catch (err: unknown) {
-      res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to update table.' });
+      const msg = err instanceof Error ? err.message : 'Failed to update table.';
+      res.status(msg.startsWith('Forbidden:') ? 403 : 400).json({ error: msg });
     }
   });
 
@@ -1560,7 +1746,13 @@ export function createApp(options?: {
         );
         return table;
       });
-      broadcastEvent('snapshot:updated', { reason: 'qr_revoked' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'qr_revoked',
+        entity: 'table',
+        action: 'update',
+        recordId: updated.id,
+        tableId: updated.id,
+      });
       res.json({ table: updated });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to revoke QR.' });
@@ -1571,7 +1763,7 @@ export function createApp(options?: {
     try {
       const { targetTableId } = req.body as { targetTableId?: string };
       if (!targetTableId) return res.status(400).json({ error: 'Target table is required.' });
-      await mutateSnapshot((snap) => {
+      const moved = await mutateSnapshot((snap) => {
         const src = snap.tables.find((t) => t.id === req.params.id);
         const dst = snap.tables.find((t) => t.id === targetTableId && !t.isArchived && t.status !== 'Blocked');
         if (!src || !dst) throw new Error('Source or target table not available.');
@@ -1611,8 +1803,16 @@ export function createApp(options?: {
           undefined,
           { fromTable: src.tableNumber, toTable: dst.tableNumber }
         );
+        return { sessionId: activeSession.id, dstTableId: dst.id };
       });
-      broadcastEvent('snapshot:updated', { reason: 'session_moved' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'session_moved',
+        entity: 'session',
+        action: 'update',
+        recordId: moved.sessionId,
+        tableId: moved.dstTableId,
+        sessionId: moved.sessionId,
+      });
       res.json({ ok: true });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to move session.' });
@@ -1639,13 +1839,19 @@ export function createApp(options?: {
           'Clean table without historical sessions/orders/bills',
           { tableNumber: table.tableNumber }
         );
-        return { blocked: false as const };
+        return { blocked: false as const, tableId: table.id };
       });
 
       if (result.blocked) {
         return res.status(409).json({ error: result.reason });
       }
-      broadcastEvent('snapshot:updated', { reason: 'table_deleted' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'table_deleted',
+        entity: 'table',
+        action: 'delete',
+        recordId: result.tableId,
+        tableId: result.tableId,
+      });
       res.json({ ok: true });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Delete failed.' });
@@ -1686,7 +1892,14 @@ export function createApp(options?: {
           return entry;
         });
 
-        broadcastEvent('snapshot:updated', { reason: 'presence_confirmed' });
+        broadcastEvent('snapshot:updated', {
+          reason: 'presence_confirmed',
+          entity: 'verification',
+          action: 'update',
+          recordId: vr.id,
+          tableId: vr.tableId,
+          waiterId: vr.waiterId,
+        });
         res.json({ verificationRequest: vr, otp: revealed.otp, expiresAt: revealed.expiresAt });
       } catch (err: unknown) {
         res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to confirm presence.' });
@@ -1729,7 +1942,14 @@ export function createApp(options?: {
           );
           return entry;
         });
-        broadcastEvent('snapshot:updated', { reason: 'verification_rejected' });
+        broadcastEvent('snapshot:updated', {
+          reason: 'verification_rejected',
+          entity: 'verification',
+          action: 'update',
+          recordId: vr.id,
+          tableId: vr.tableId,
+          waiterId: vr.waiterId,
+        });
         res.json({ verificationRequest: vr });
       } catch (err: unknown) {
         res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to reject verification.' });
@@ -1751,16 +1971,34 @@ export function createApp(options?: {
         const updated = await mutateSnapshot((snap) => {
           const sr = snap.serviceRequests.find((s) => s.id === req.params.id);
           if (!sr) throw new Error('Service request not found.');
+          if (
+            !hasPermission(req.staff!.role, 'view_all_tables') &&
+            sr.waiterId &&
+            sr.waiterId !== req.staff!.id &&
+            sr.waiterId !== req.staff!.uid &&
+            !req.staff!.assignedTableIds.includes(sr.tableId)
+          ) {
+            throw new Error('Forbidden: this service request belongs to another waiter table.');
+          }
           if (status) sr.status = status;
           if (notes !== undefined) sr.notes = notes;
           sr.waiterId = req.staff!.id;
           sr.updatedAt = new Date().toISOString();
           return sr;
         });
-        broadcastEvent('snapshot:updated', { reason: 'service_request_updated' });
+        broadcastEvent('snapshot:updated', {
+          reason: 'service_request_updated',
+          entity: 'service_request',
+          action: 'update',
+          recordId: updated.id,
+          tableId: updated.tableId,
+          sessionId: updated.sessionId,
+          waiterId: updated.waiterId,
+        });
         res.json({ serviceRequest: updated });
       } catch (err: unknown) {
-        res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to update service request.' });
+        const msg = err instanceof Error ? err.message : 'Failed to update service request.';
+        res.status(msg.startsWith('Forbidden:') ? 403 : 400).json({ error: msg });
       }
     }
   );
@@ -1781,6 +2019,16 @@ export function createApp(options?: {
         const table = tableId ? snap.tables.find((t) => t.id === tableId && !t.isArchived) : undefined;
         if ((resolvedChannel === 'waiter' || resolvedChannel === 'dine_in_qr') && !table) {
           throw new Error('Table selection is required for dine-in waiter orders.');
+        }
+        if (
+          table &&
+          req.staff!.role === 'waiter' &&
+          !hasPermission(req.staff!.role, 'view_all_tables') &&
+          table.assignedWaiterId !== req.staff!.id &&
+          table.assignedWaiterId !== req.staff!.uid &&
+          !req.staff!.assignedTableIds.includes(table.id)
+        ) {
+          throw new Error('Forbidden: only the waiter assigned to this table (or a manager) can place orders here.');
         }
 
         const now = new Date().toISOString();
@@ -1856,10 +2104,109 @@ export function createApp(options?: {
         return { order, tickets };
       });
 
-      broadcastEvent('snapshot:updated', { reason: 'staff_order_created' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'staff_order_created',
+        entity: 'order',
+        action: 'create',
+        recordId: created.order.id,
+        tableId: created.order.tableId,
+        sessionId: created.order.sessionId,
+        waiterId: created.order.waiterId,
+        channel: created.order.channel,
+      });
       res.status(201).json(created);
     } catch (err: unknown) {
-      res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to create order.' });
+      const msg = err instanceof Error ? err.message : 'Unable to create order.';
+      res.status(msg.startsWith('Forbidden:') ? 403 : 400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/orders/:id/confirm', requireAuth, requirePerm('confirm_table_order'), async (req: AuthedRequest, res) => {
+    try {
+      const result = await mutateSnapshot((snap) => {
+        const order = snap.orders.find((o) => o.id === req.params.id);
+        if (!order) {
+          return { statusCode: 404 as const, error: 'Order not found.' };
+        }
+        const table = order.tableId ? snap.tables.find((t) => t.id === order.tableId) : undefined;
+        const session = order.sessionId ? snap.sessions.find((s) => s.id === order.sessionId) : undefined;
+        const authCheck = canStaffConfirmTableOrder(order, table, session, req.staff!);
+        if (!authCheck.allowed) {
+          const isRoleOrAssignment =
+            authCheck.reason?.includes('assigned to this table') ||
+            authCheck.reason?.includes('cannot confirm');
+          return {
+            statusCode: (isRoleOrAssignment ? 403 : 400) as 403 | 400,
+            error: authCheck.reason || 'Unable to confirm order.',
+          };
+        }
+
+        const now = new Date().toISOString();
+        order.status = 'Confirmed';
+        if (!order.waiterId) {
+          order.waiterId = req.staff!.id;
+          order.waiterName = req.staff!.name;
+        }
+        order.timeline.push({
+          status: 'Confirmed',
+          actorId: req.staff!.id,
+          actorName: req.staff!.name,
+          note: `Confirmed by ${req.staff!.name} and dispatched to kitchen`,
+          timestamp: now,
+        });
+        order.updatedAt = now;
+
+        const existingTickets = snap.tickets.filter((t) => t.orderId === order.id);
+        const createdTickets =
+          existingTickets.length > 0 ? existingTickets : splitOrderIntoKitchenTickets(order, snap.stations);
+        if (existingTickets.length === 0) {
+          snap.tickets.unshift(...createdTickets);
+        }
+
+        if (table) {
+          table.status = 'Order Active';
+          table.updatedAt = now;
+        }
+
+        pushNotification(
+          snap,
+          ['kitchen_staff', 'kitchen_supervisor', 'manager', 'owner'],
+          'urgent',
+          `Confirmed Order ${order.orderNumber}`,
+          `${order.tableNumber || order.channel} confirmed by ${req.staff!.name} • ${createdTickets.length} kitchen ticket(s).`,
+          'kitchen'
+        );
+
+        appendAudit(
+          snap,
+          { id: req.staff!.id, name: req.staff!.name, role: req.staff!.role },
+          'ORDER_CONFIRMED_TO_KITCHEN',
+          'order',
+          order.id,
+          undefined,
+          { tableId: order.tableId || null, ticketsCreated: createdTickets.length }
+        );
+
+        return { statusCode: 200 as const, order, tickets: createdTickets };
+      });
+
+      if (result.statusCode !== 200) {
+        return res.status(result.statusCode).json({ error: result.error });
+      }
+
+      broadcastEvent('snapshot:updated', {
+        reason: 'order_confirmed',
+        entity: 'order',
+        action: 'update',
+        recordId: result.order.id,
+        tableId: result.order.tableId,
+        sessionId: result.order.sessionId,
+        waiterId: result.order.waiterId,
+        channel: result.order.channel,
+      });
+      res.json({ order: result.order, tickets: result.tickets });
+    } catch (err: unknown) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to confirm order.' });
     }
   });
 
@@ -1877,9 +2224,50 @@ export function createApp(options?: {
         if (!order) throw new Error('Order not found.');
         const now = new Date().toISOString();
 
-        if (status === 'Cancelled') {
-          if (!hasPermission(req.staff!.role, 'cancel_order')) {
-            throw new Error('Only Managers or Supervisors can cancel orders.');
+        if (status === 'Confirmed' && order.status === 'Submitted') {
+          const table = order.tableId ? snap.tables.find((t) => t.id === order.tableId) : undefined;
+          const session = order.sessionId ? snap.sessions.find((s) => s.id === order.sessionId) : undefined;
+          const authCheck = canStaffConfirmTableOrder(order, table, session, req.staff!);
+          if (!authCheck.allowed) {
+            throw new Error(`Forbidden: ${authCheck.reason || 'Not authorized to confirm order.'}`);
+          }
+          order.status = 'Confirmed';
+          if (!order.waiterId) {
+            order.waiterId = req.staff!.id;
+            order.waiterName = req.staff!.name;
+          }
+          const existingTickets = snap.tickets.filter((t) => t.orderId === order.id);
+          if (existingTickets.length === 0) {
+            const newTickets = splitOrderIntoKitchenTickets(order, snap.stations);
+            snap.tickets.unshift(...newTickets);
+          }
+          if (table) {
+            table.status = 'Order Active';
+            table.updatedAt = now;
+          }
+          pushNotification(
+            snap,
+            ['kitchen_staff', 'kitchen_supervisor', 'manager', 'owner'],
+            'urgent',
+            `Confirmed Order ${order.orderNumber}`,
+            `${order.tableNumber || order.channel} confirmed by ${req.staff!.name}.`,
+            'kitchen'
+          );
+          appendAudit(
+            snap,
+            { id: req.staff!.id, name: req.staff!.name, role: req.staff!.role },
+            'ORDER_CONFIRMED_TO_KITCHEN',
+            'order',
+            order.id
+          );
+        } else if (status === 'Cancelled') {
+          const table = order.tableId ? snap.tables.find((t) => t.id === order.tableId) : undefined;
+          const session = order.sessionId ? snap.sessions.find((s) => s.id === order.sessionId) : undefined;
+          const waiterRejectingSubmitted =
+            order.status === 'Submitted' &&
+            canStaffConfirmTableOrder(order, table, session, req.staff!).allowed;
+          if (!hasPermission(req.staff!.role, 'cancel_order') && !waiterRejectingSubmitted) {
+            throw new Error('Forbidden: Only Managers, Supervisors, or the assigned Waiter (before kitchen dispatch) can cancel orders.');
           }
           if (!cancellationReason || cancellationReason.trim().length < 3) {
             throw new Error('Cancellation reason is required.');
@@ -1890,6 +2278,19 @@ export function createApp(options?: {
             if (t.orderId === order.id) {
               t.status = 'cancelled';
               t.updatedAt = now;
+            }
+          }
+          if (table) {
+            const otherActive = snap.orders.some(
+              (o) =>
+                o.id !== order.id &&
+                o.tableId === table.id &&
+                o.status !== 'Cancelled' &&
+                o.status !== 'Completed'
+            );
+            if (!otherActive) {
+              table.status = 'Occupied';
+              table.updatedAt = now;
             }
           }
           appendAudit(
@@ -1953,10 +2354,20 @@ export function createApp(options?: {
         return order;
       });
 
-      broadcastEvent('snapshot:updated', { reason: 'order_updated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'order_updated',
+        entity: 'order',
+        action: 'update',
+        recordId: updated.id,
+        tableId: updated.tableId,
+        sessionId: updated.sessionId,
+        waiterId: updated.waiterId,
+        channel: updated.channel,
+      });
       res.json({ order: updated });
     } catch (err: unknown) {
-      res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to update order.' });
+      const msg = err instanceof Error ? err.message : 'Unable to update order.';
+      res.status(msg.startsWith('Forbidden:') ? 403 : 400).json({ error: msg });
     }
   });
 
@@ -1976,9 +2387,22 @@ export function createApp(options?: {
         toggleItemId?: string;
       };
 
-      const updated = await mutateSnapshot((snap) => {
+      const result = await mutateSnapshot((snap) => {
         const ticket = snap.tickets.find((t) => t.id === req.params.id);
         if (!ticket) throw new Error('Kitchen ticket not found.');
+        const order = snap.orders.find((o) => o.id === ticket.orderId);
+        if (
+          !canKitchen &&
+          canServe &&
+          !hasPermission(req.staff!.role, 'view_all_tables') &&
+          order?.tableId &&
+          !req.staff!.assignedTableIds.includes(order.tableId) &&
+          order.waiterId !== req.staff!.id &&
+          order.waiterId !== req.staff!.uid
+        ) {
+          throw new Error('Forbidden: you are not assigned to this table.');
+        }
+
         const now = new Date().toISOString();
 
         if (toggleItemId) {
@@ -1995,7 +2419,7 @@ export function createApp(options?: {
 
         if (status) {
           ticket.status = status;
-          if (status === 'ready') {
+          if (status === 'ready' || status === 'completed') {
             for (const it of ticket.items) it.status = 'ready';
           } else if (status === 'preparing') {
             for (const it of ticket.items) if (it.status === 'new') it.status = 'preparing';
@@ -2005,7 +2429,6 @@ export function createApp(options?: {
         if (clarificationNote !== undefined) ticket.clarificationNote = clarificationNote;
         ticket.updatedAt = now;
 
-        const order = snap.orders.find((o) => o.id === ticket.orderId);
         if (order) {
           const siblingTickets = snap.tickets.filter((t) => t.orderId === order.id);
           const derived = deriveOrderStatusFromTickets(siblingTickets, order.channel, order.status);
@@ -2015,7 +2438,10 @@ export function createApp(options?: {
               status: derived,
               actorId: req.staff!.id,
               actorName: req.staff!.name,
-              note: `${ticket.stationName} ticket ${ticket.status}`,
+              note:
+                ticket.status === 'completed'
+                  ? `${ticket.stationName} completed order (moved to kitchen history)`
+                  : `${ticket.stationName} ticket ${ticket.status}`,
               timestamp: now,
             });
           }
@@ -2028,8 +2454,18 @@ export function createApp(options?: {
                 table.status = 'Food Ready';
               } else if (order.status === 'Preparing') {
                 table.status = 'Preparing';
-              } else if (order.status === 'Served') {
-                table.status = 'Occupied';
+              } else if (order.status === 'Served' || order.status === 'Completed') {
+                const otherOpenOrders = snap.orders.some(
+                  (o) =>
+                    o.id !== order.id &&
+                    o.tableId === table.id &&
+                    o.status !== 'Cancelled' &&
+                    o.status !== 'Completed' &&
+                    o.status !== 'Served'
+                );
+                if (!otherOpenOrders) {
+                  table.status = 'Occupied';
+                }
               }
               table.updatedAt = now;
             }
@@ -2046,6 +2482,26 @@ export function createApp(options?: {
               'pickup',
               order.waiterId
             );
+          } else if (ticket.status === 'completed') {
+            pushNotification(
+              snap,
+              ['waiter', 'manager', 'owner'],
+              'success',
+              `Order Completed: ${order.orderNumber}`,
+              `${ticket.stationName} moved ${order.orderNumber} (${order.tableNumber || order.channel}) to Kitchen History.`,
+              'manager',
+              'orders',
+              order.waiterId
+            );
+            appendAudit(
+              snap,
+              { id: req.staff!.id, name: req.staff!.name, role: req.staff!.role },
+              'KITCHEN_TICKET_COMPLETED',
+              'kitchen_ticket',
+              ticket.id,
+              undefined,
+              { orderId: order.id, orderNumber: order.orderNumber }
+            );
           } else if (ticket.status === 'delayed') {
             pushNotification(
               snap,
@@ -2054,18 +2510,30 @@ export function createApp(options?: {
               `Order Delayed: ${order.orderNumber}`,
               `${ticket.stationName}: ${delayReason || 'Kitchen reported delay'}`,
               'manager',
-              'kitchen'
+              'kitchen',
+              order.waiterId
             );
           }
         }
 
-        return ticket;
+        return { ticket, order };
       });
 
-      broadcastEvent('snapshot:updated', { reason: 'kitchen_ticket_updated' });
-      res.json({ ticket: updated });
+      broadcastEvent('snapshot:updated', {
+        reason: 'kitchen_ticket_updated',
+        entity: 'kitchen_ticket',
+        action: 'update',
+        recordId: result.ticket.id,
+        tableId: result.order?.tableId,
+        sessionId: result.order?.sessionId,
+        waiterId: result.order?.waiterId,
+        stationId: result.ticket.stationId,
+        channel: result.order?.channel,
+      });
+      res.json({ ticket: result.ticket });
     } catch (err: unknown) {
-      res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to update ticket.' });
+      const msg = err instanceof Error ? err.message : 'Unable to update ticket.';
+      res.status(msg.startsWith('Forbidden:') ? 403 : 400).json({ error: msg });
     }
   });
 
@@ -2109,7 +2577,14 @@ export function createApp(options?: {
         );
         return consolidated;
       });
-      broadcastEvent('snapshot:updated', { reason: 'bill_generated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'bill_generated',
+        entity: 'bill',
+        action: 'create',
+        recordId: bill.id,
+        tableId: bill.tableId,
+        sessionId: bill.sessionId,
+      });
       res.json({ bill });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to generate bill.' });
@@ -2190,7 +2665,14 @@ export function createApp(options?: {
         return { bill: updatedBill, payment };
       });
 
-      broadcastEvent('snapshot:updated', { reason: 'payment_recorded' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'payment_recorded',
+        entity: 'payment',
+        action: 'create',
+        recordId: result.payment.id,
+        tableId: result.bill.tableId,
+        sessionId: result.bill.sessionId,
+      });
       res.json(result);
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to record payment.' });
@@ -2232,7 +2714,14 @@ export function createApp(options?: {
         );
         return next;
       });
-      broadcastEvent('snapshot:updated', { reason: 'bill_adjusted' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'bill_adjusted',
+        entity: 'bill',
+        action: 'update',
+        recordId: updated.id,
+        tableId: updated.tableId,
+        sessionId: updated.sessionId,
+      });
       res.json({ bill: updated });
     } catch (err: unknown) {
       res.status(403).json({ error: err instanceof Error ? err.message : 'Adjustment denied.' });
@@ -2262,7 +2751,12 @@ export function createApp(options?: {
         );
         return entry;
       });
-      broadcastEvent('snapshot:updated', { reason: 'menu_updated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'menu_updated',
+        entity: 'menu',
+        action: 'create',
+        recordId: cat.id,
+      });
       res.status(201).json({ category: cat });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to create category.' });
@@ -2277,7 +2771,12 @@ export function createApp(options?: {
         Object.assign(cat, req.body);
         return cat;
       });
-      broadcastEvent('snapshot:updated', { reason: 'menu_updated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'menu_updated',
+        entity: 'menu',
+        action: 'update',
+        recordId: updated.id,
+      });
       res.json({ category: updated });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to update category.' });
@@ -2360,7 +2859,12 @@ export function createApp(options?: {
         );
         return entry;
       });
-      broadcastEvent('snapshot:updated', { reason: 'menu_updated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'menu_updated',
+        entity: 'menu',
+        action: 'create',
+        recordId: item.id,
+      });
       res.status(201).json({ item });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to create menu item.' });
@@ -2413,7 +2917,12 @@ export function createApp(options?: {
         }
         return entry;
       });
-      broadcastEvent('snapshot:updated', { reason: 'menu_updated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'menu_updated',
+        entity: 'menu',
+        action: 'update',
+        recordId: item.id,
+      });
       res.json({ item });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to update menu item.' });
@@ -2490,7 +2999,12 @@ export function createApp(options?: {
         return profile;
       });
       await setStaffPassword(created.id, created.email, created.employeeId, passcode.trim());
-      broadcastEvent('snapshot:updated', { reason: 'staff_updated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'staff_updated',
+        entity: 'staff',
+        action: 'create',
+        recordId: created.id,
+      });
       res.status(201).json({ staff: created });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to create staff account.' });
@@ -2579,7 +3093,12 @@ export function createApp(options?: {
       if (result.emailChanged) {
         await updateStaffCredentialEmail(result.staff.id, result.staff.email, result.staff.employeeId);
       }
-      broadcastEvent('snapshot:updated', { reason: 'staff_updated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'staff_updated',
+        entity: 'staff',
+        action: 'update',
+        recordId: result.staff.id,
+      });
       res.json({ staff: result.staff });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to update staff.' });
@@ -2612,7 +3131,12 @@ export function createApp(options?: {
         }
         return { onDuty: me.onDuty };
       });
-      broadcastEvent('snapshot:updated', { reason: 'shift_toggled' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'shift_toggled',
+        entity: 'staff',
+        action: 'update',
+        recordId: req.staff!.id,
+      });
       res.json(result);
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to toggle shift.' });
@@ -2665,7 +3189,12 @@ export function createApp(options?: {
         }
         return item;
       });
-      broadcastEvent('snapshot:updated', { reason: 'inventory_updated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'inventory_updated',
+        entity: 'inventory',
+        action: 'update',
+        recordId: updated.id,
+      });
       res.json({ item: updated });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Inventory adjustment failed.' });
@@ -2693,7 +3222,12 @@ export function createApp(options?: {
         snap.inventory.push(entry);
         return entry;
       });
-      broadcastEvent('snapshot:updated', { reason: 'inventory_updated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'inventory_updated',
+        entity: 'inventory',
+        action: 'create',
+        recordId: item.id,
+      });
       res.status(201).json({ item });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to create inventory item.' });
@@ -2728,7 +3262,12 @@ export function createApp(options?: {
         snap.purchaseOrders.unshift(entry);
         return entry;
       });
-      broadcastEvent('snapshot:updated', { reason: 'po_created' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'po_created',
+        entity: 'inventory',
+        action: 'create',
+        recordId: po.id,
+      });
       res.status(201).json({ purchaseOrder: po });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to create purchase order.' });
@@ -2781,7 +3320,13 @@ export function createApp(options?: {
           );
           return cfg;
         });
-        broadcastEvent('snapshot:updated', { reason: 'integration_updated' });
+        broadcastEvent('snapshot:updated', {
+          reason: 'integration_updated',
+          entity: 'integration',
+          action: 'update',
+          recordId: updated.id,
+          channel: platformKey,
+        });
         res.json({ platform: updated });
       } catch (err: unknown) {
         res.status(400).json({ error: err instanceof Error ? err.message : 'Integration update failed.' });
@@ -2814,7 +3359,13 @@ export function createApp(options?: {
           false
         )
       );
-      broadcastEvent('snapshot:updated', { reason: 'online_order_received' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'online_order_received',
+        entity: 'order',
+        action: 'create',
+        recordId: result.order.id,
+        channel: platformKey,
+      });
       res.status(201).json(result);
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Webhook ingestion failed.' });
@@ -2837,7 +3388,13 @@ export function createApp(options?: {
             true
           )
         );
-        broadcastEvent('snapshot:updated', { reason: 'sandbox_online_order' });
+        broadcastEvent('snapshot:updated', {
+          reason: 'sandbox_online_order',
+          entity: 'order',
+          action: 'create',
+          recordId: result.order.id,
+          channel: platformKey,
+        });
         res.status(201).json(result);
       } catch (err: unknown) {
         res.status(400).json({ error: err instanceof Error ? err.message : 'Sandbox order test failed.' });
@@ -2875,7 +3432,12 @@ export function createApp(options?: {
         );
         return snap.settings;
       });
-      broadcastEvent('snapshot:updated', { reason: 'settings_updated' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'settings_updated',
+        entity: 'settings',
+        action: 'update',
+        recordId: updated.id,
+      });
       res.json({ settings: updated });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to update settings.' });
@@ -2890,7 +3452,12 @@ export function createApp(options?: {
           if (!id || n.id === id) n.isRead = true;
         }
       });
-      broadcastEvent('snapshot:updated', { reason: 'notifications_read' });
+      broadcastEvent('snapshot:updated', {
+        reason: 'notifications_read',
+        entity: 'notification',
+        action: 'update',
+        recordId: id,
+      });
       res.json({ ok: true });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to mark read.' });
