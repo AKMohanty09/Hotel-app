@@ -131,6 +131,14 @@ async function ensurePgSchema(): Promise<void> {
     global._shPgSchemaReady = (async () => {
       const pool = getPgPool();
       await pool.query(CORE_TABLES_PG_DDL);
+      await pool.query(`
+        ALTER TABLE restaurant_reviews ADD COLUMN IF NOT EXISTS table_id TEXT;
+        ALTER TABLE restaurant_reviews ADD COLUMN IF NOT EXISTS customer_name TEXT;
+        ALTER TABLE restaurant_reviews ADD COLUMN IF NOT EXISTS manager_reply TEXT;
+        ALTER TABLE restaurant_reviews ADD COLUMN IF NOT EXISTS replied_by TEXT;
+        ALTER TABLE restaurant_reviews ADD COLUMN IF NOT EXISTS replied_at TIMESTAMPTZ;
+        ALTER TABLE restaurant_reviews ALTER COLUMN session_id DROP NOT NULL;
+      `).catch(() => {});
     })().catch((err) => {
       global._shPgSchemaReady = undefined;
       throw err;
@@ -251,6 +259,47 @@ async function getSqliteDb(): Promise<import('node:sqlite').DatabaseSync> {
       sqlite.exec('PRAGMA journal_mode = WAL;');
       sqlite.exec('PRAGMA foreign_keys = ON;');
       sqlite.exec(CORE_TABLES_SQLITE_DDL);
+      const reviewCols = sqlite.prepare('PRAGMA table_info(restaurant_reviews)').all() as {
+        name: string;
+        notnull: number;
+      }[];
+      const existingReviewCols = new Set(reviewCols.map((c) => c.name));
+      const sessionCol = reviewCols.find((c) => c.name === 'session_id');
+      const needsReviewRebuild =
+        (sessionCol && sessionCol.notnull === 1) ||
+        !existingReviewCols.has('table_id') ||
+        !existingReviewCols.has('customer_name') ||
+        !existingReviewCols.has('manager_reply') ||
+        !existingReviewCols.has('replied_by') ||
+        !existingReviewCols.has('replied_at');
+      if (needsReviewRebuild) {
+        sqlite.exec(`
+          CREATE TABLE IF NOT EXISTS restaurant_reviews_migrated (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            table_id TEXT,
+            table_number TEXT NOT NULL,
+            customer_name TEXT,
+            overall_rating INTEGER NOT NULL CHECK (overall_rating BETWEEN 1 AND 5),
+            food_rating INTEGER NOT NULL CHECK (food_rating BETWEEN 1 AND 5),
+            service_rating INTEGER NOT NULL CHECK (service_rating BETWEEN 1 AND 5),
+            comment TEXT,
+            manager_reply TEXT,
+            replied_by TEXT,
+            replied_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+          );
+          INSERT OR IGNORE INTO restaurant_reviews_migrated (
+            id, session_id, table_number, overall_rating, food_rating, service_rating, comment, created_at
+          )
+          SELECT id, session_id, table_number, overall_rating, food_rating, service_rating, comment, created_at
+          FROM restaurant_reviews;
+          DROP TABLE restaurant_reviews;
+          ALTER TABLE restaurant_reviews_migrated RENAME TO restaurant_reviews;
+          CREATE INDEX IF NOT EXISTS idx_restaurant_reviews_created_at ON restaurant_reviews (created_at DESC);
+          CREATE INDEX IF NOT EXISTS idx_restaurant_reviews_session_id ON restaurant_reviews (session_id);
+        `);
+      }
       global._shSqliteDb = sqlite;
       return sqlite;
     })();

@@ -424,12 +424,17 @@ create table if not exists public.audit_logs (
 
 create table if not exists public.restaurant_reviews (
   id text primary key,
-  session_id text not null,
+  session_id text,
+  table_id text,
   table_number text not null,
-  overall_rating integer not null,
-  food_rating integer not null,
-  service_rating integer not null,
+  customer_name text,
+  overall_rating integer not null check (overall_rating between 1 and 5),
+  food_rating integer not null check (food_rating between 1 and 5),
+  service_rating integer not null check (service_rating between 1 and 5),
   comment text,
+  manager_reply text,
+  replied_by text,
+  replied_at timestamptz,
   created_at timestamptz not null default now()
 );
 
@@ -441,6 +446,8 @@ create index if not exists idx_kitchen_tickets_order_id on public.kitchen_ticket
 create index if not exists idx_bills_session_id on public.bills (session_id);
 create index if not exists idx_payments_bill_id on public.payments (bill_id);
 create index if not exists idx_audit_logs_created_at on public.audit_logs (created_at desc);
+create index if not exists idx_restaurant_reviews_created_at on public.restaurant_reviews (created_at desc);
+create index if not exists idx_restaurant_reviews_session_id on public.restaurant_reviews (session_id);
 
 -- 10. Row Level Security (Backend uses service_role key; anon/public PostgREST blocked)
 alter table public.restaurant_state enable row level security;

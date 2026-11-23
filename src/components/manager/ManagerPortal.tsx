@@ -10,6 +10,7 @@ import {
   Receipt,
   Settings,
   Shield,
+  Star,
   Users,
   Utensils,
   X,
@@ -21,6 +22,7 @@ import { ManagerTables } from './ManagerTables';
 import { ManagerOrdersAndOnline } from './ManagerOrdersAndOnline';
 import { ManagerMenuAndInventory } from './ManagerMenuAndInventory';
 import { ManagerBillingReportsStaff } from './ManagerBillingReportsStaff';
+import { ManagerReviews } from './ManagerReviews';
 import { StaffAvatar } from '../common/StaffAvatar';
 import { KitchenPortal } from '../kitchen/KitchenPortal';
 
@@ -45,6 +47,7 @@ export type ManagerTabId =
   | 'billing'
   | 'inventory'
   | 'reports'
+  | 'reviews'
   | 'staff'
   | 'audit'
   | 'settings';
@@ -110,6 +113,12 @@ export const ManagerPortal: React.FC<ManagerPortalProps> = ({
       label: 'Reports & Export',
       icon: BarChart3,
       allowed: hasPermission(currentStaff.role, 'view_reports'),
+    },
+    {
+      id: 'reviews',
+      label: 'Guest Reviews',
+      icon: Star,
+      allowed: hasPermission(currentStaff.role, 'manage_reviews') || hasPermission(currentStaff.role, 'view_dashboard'),
     },
     {
       id: 'staff',
@@ -272,6 +281,13 @@ export const ManagerPortal: React.FC<ManagerPortalProps> = ({
             snapshot={snapshot}
             currentStaff={currentStaff}
             section="reports"
+            onRefresh={onRefresh}
+          />
+        )}
+        {activeItem?.id === 'reviews' && (
+          <ManagerReviews
+            snapshot={snapshot}
+            currentStaff={currentStaff}
             onRefresh={onRefresh}
           />
         )}

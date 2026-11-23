@@ -506,12 +506,17 @@ export interface AuditLog {
 
 export interface RestaurantReview {
   id: string;
-  sessionId: string;
+  sessionId?: string;
+  tableId?: string;
   tableNumber: string;
+  customerName?: string;
   overallRating: number;
   foodRating: number;
   serviceRating: number;
   comment?: string;
+  managerReply?: string;
+  repliedBy?: string;
+  repliedAt?: string;
   createdAt: string;
 }
 

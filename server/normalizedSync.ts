@@ -561,14 +561,19 @@ function buildNormalizedRows(snapshot: RestaurantSnapshot): Record<string, SqlRo
       metadata_json: a.metadata ? JSON.stringify(a.metadata) : null,
       created_at: a.createdAt,
     })),
-    restaurant_reviews: snapshot.reviews.map((rv) => ({
+    restaurant_reviews: (snapshot.reviews || []).map((rv) => ({
       id: rv.id,
-      session_id: rv.sessionId,
+      session_id: rv.sessionId || null,
+      table_id: rv.tableId || null,
       table_number: rv.tableNumber,
+      customer_name: rv.customerName || null,
       overall_rating: Number(rv.overallRating),
       food_rating: Number(rv.foodRating),
       service_rating: Number(rv.serviceRating),
       comment: rv.comment || null,
+      manager_reply: rv.managerReply || null,
+      replied_by: rv.repliedBy || null,
+      replied_at: rv.repliedAt || null,
       created_at: rv.createdAt,
     })),
   };
@@ -625,7 +630,22 @@ export async function syncSnapshotToNormalizedTables(params: {
       }
       if (upserts.length > 0) {
         const up = await sb.from(table).upsert(upserts, { onConflict: 'id' });
-        if (up.error && !isSchemaMissingError(up.error)) {
+        if (up.error && table === 'restaurant_reviews') {
+          const legacyRows = upserts.map((r) => ({
+            id: r.id,
+            session_id: r.session_id || r.table_id || `table_${r.table_number}`,
+            table_number: r.table_number,
+            overall_rating: r.overall_rating,
+            food_rating: r.food_rating,
+            service_rating: r.service_rating,
+            comment: r.comment,
+            created_at: r.created_at,
+          }));
+          const retry = await sb.from(table).upsert(legacyRows, { onConflict: 'id' });
+          if (retry.error && !isSchemaMissingError(retry.error)) {
+            console.warn(`Normalized upsert (${table}) skipped:`, retry.error.message);
+          }
+        } else if (up.error && !isSchemaMissingError(up.error)) {
           console.warn(`Normalized upsert (${table}) skipped:`, up.error.message);
         }
       }

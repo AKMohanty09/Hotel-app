@@ -87,6 +87,7 @@ export interface CustomerTableBootstrap {
   sessionOrders: Order[];
   sessionBill: Bill | null;
   serviceRequests: CustomerServiceRequest[];
+  sessionReview?: RestaurantReview | null;
 }
 
 export const api = {
@@ -169,6 +170,7 @@ export const api = {
       payments: PaymentRecord[];
       serviceRequests: CustomerServiceRequest[];
       table: RestaurantTable;
+      review?: RestaurantReview | null;
     }>(`/api/public/session/${encodeURIComponent(sessionId)}`),
   submitCustomerOrder: (
     sessionId: string,
@@ -200,7 +202,9 @@ export const api = {
       body: JSON.stringify({ billId, amount, method, reference }),
     }),
   submitReview: (payload: {
-    sessionId: string;
+    sessionId?: string;
+    qrToken?: string;
+    customerName?: string;
     overallRating: number;
     foodRating: number;
     serviceRating: number;
@@ -209,6 +213,15 @@ export const api = {
     requestJson<{ review: RestaurantReview }>('/api/public/reviews', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+  replyToReview: (reviewId: string, reply: string) =>
+    requestJson<{ review: RestaurantReview }>(`/api/reviews/${encodeURIComponent(reviewId)}/reply`, {
+      method: 'POST',
+      body: JSON.stringify({ reply }),
+    }),
+  deleteReview: (reviewId: string) =>
+    requestJson<{ ok: boolean }>(`/api/reviews/${encodeURIComponent(reviewId)}`, {
+      method: 'DELETE',
     }),
 
   // Staff / Manager / Waiter / Kitchen

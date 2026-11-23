@@ -26,7 +26,8 @@ export type Permission =
   | 'access_kitchen_kds'
   | 'update_kitchen_ticket'
   | 'confirm_table_order'
-  | 'cancel_order';
+  | 'cancel_order'
+  | 'manage_reviews';
 
 export const ROLE_PERMISSIONS: Record<StaffRole, Permission[]> = {
   owner: [
@@ -56,6 +57,7 @@ export const ROLE_PERMISSIONS: Record<StaffRole, Permission[]> = {
     'update_kitchen_ticket',
     'confirm_table_order',
     'cancel_order',
+    'manage_reviews',
   ],
   manager: [
     'view_dashboard',
@@ -83,6 +85,7 @@ export const ROLE_PERMISSIONS: Record<StaffRole, Permission[]> = {
     'update_kitchen_ticket',
     'confirm_table_order',
     'cancel_order',
+    'manage_reviews',
   ],
   shift_supervisor: [
     'view_dashboard',

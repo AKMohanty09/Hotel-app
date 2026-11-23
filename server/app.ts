@@ -240,7 +240,10 @@ function sanitizeSnapshotForRole(snap: RestaurantSnapshot, staff: StaffProfile):
     };
   }
 
-  return snap;
+  return {
+    ...snap,
+    reviews: snap.reviews || [],
+  };
 }
 
 function sanitizePublicSettings(snap: RestaurantSnapshot) {
@@ -854,8 +857,14 @@ export function createApp(options?: {
 
       let activeSession: TableSession | null = null;
       if (sessionIdQuery) {
+        const hasNewerActiveSession = snap.sessions.some(
+          (s) => s.tableId === table.id && s.status !== 'closed' && s.id !== sessionIdQuery
+        );
         const found = snap.sessions.find(
-          (s) => s.id === sessionIdQuery && s.tableId === table.id && s.status !== 'closed'
+          (s) =>
+            s.id === sessionIdQuery &&
+            s.tableId === table.id &&
+            (s.status !== 'closed' || !hasNewerActiveSession)
         );
         if (found) activeSession = found;
       }
@@ -877,6 +886,9 @@ export function createApp(options?: {
       const serviceRequests = activeSession
         ? snap.serviceRequests.filter((sr) => sr.sessionId === activeSession!.id)
         : [];
+      const sessionReview = activeSession
+        ? (snap.reviews || []).find((r) => r.sessionId === activeSession!.id) || null
+        : null;
 
       res.json({
         settings: sanitizePublicSettings(snap),
@@ -898,6 +910,7 @@ export function createApp(options?: {
         sessionOrders,
         sessionBill,
         serviceRequests,
+        sessionReview,
       });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Unable to load table.' });
@@ -1175,7 +1188,8 @@ export function createApp(options?: {
       const payments = bill ? snap.payments.filter((p) => p.billId === bill.id) : [];
       const serviceRequests = snap.serviceRequests.filter((sr) => sr.sessionId === session.id);
       const table = snap.tables.find((t) => t.id === session.tableId);
-      res.json({ session, orders, bill, payments, serviceRequests, table });
+      const review = (snap.reviews || []).find((r) => r.sessionId === session.id) || null;
+      res.json({ session, orders, bill, payments, serviceRequests, table, review });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Unable to fetch session.' });
     }
@@ -1505,29 +1519,87 @@ export function createApp(options?: {
 
   app.post('/api/public/reviews', async (req, res) => {
     try {
-      const { sessionId, overallRating, foodRating, serviceRating, comment } = req.body as {
-        sessionId?: string;
-        overallRating?: number;
-        foodRating?: number;
-        serviceRating?: number;
-        comment?: string;
+      const { sessionId, qrToken, customerName, overallRating, foodRating, serviceRating, comment } =
+        req.body as {
+          sessionId?: string;
+          qrToken?: string;
+          customerName?: string;
+          overallRating?: number;
+          foodRating?: number;
+          serviceRating?: number;
+          comment?: string;
+        };
+      if (!sessionId && !qrToken) {
+        return res.status(400).json({ error: 'Table QR token or dining session ID is required.' });
+      }
+
+      const clamp = (val: unknown) => {
+        const n = Number(val);
+        return Number.isFinite(n) ? Math.min(5, Math.max(1, Math.round(n))) : 5;
       };
-      if (!sessionId) return res.status(400).json({ error: 'Session ID required.' });
 
       const review = await mutateSnapshot((snap) => {
-        const session = snap.sessions.find((s) => s.id === sessionId);
-        if (!session) throw new Error('Session not found.');
+        snap.reviews ||= [];
+        const session = sessionId ? snap.sessions.find((s) => s.id === sessionId) : undefined;
+        const table = session
+          ? snap.tables.find((t) => t.id === session.tableId)
+          : qrToken
+          ? snap.tables.find((t) => t.qrToken === qrToken && !t.isArchived)
+          : undefined;
+
+        if (!session && !table) {
+          throw new Error('Table or dining session not found.');
+        }
+
+        if (session && snap.reviews.some((r) => r.sessionId === session.id)) {
+          throw new Error('Feedback has already been submitted for this dining session.');
+        }
+
+        const tableNumber = session?.tableNumber || table?.tableNumber || 'Counter';
+        const resolvedTableId = session?.tableId || table?.id;
+        const verification = session
+          ? snap.verifications.find((v) => v.sessionId === session.id)
+          : undefined;
+        const cleanCustomerName =
+          customerName?.trim().slice(0, 80) ||
+          verification?.guestLabel?.trim().slice(0, 80) ||
+          undefined;
+
         const entry = {
           id: `rev_${crypto.randomUUID().slice(0, 12)}`,
-          sessionId: session.id,
-          tableNumber: session.tableNumber,
-          overallRating: Math.min(5, Math.max(1, Number(overallRating || 5))),
-          foodRating: Math.min(5, Math.max(1, Number(foodRating || 5))),
-          serviceRating: Math.min(5, Math.max(1, Number(serviceRating || 5))),
-          comment: comment?.trim().slice(0, 500),
+          sessionId: session?.id,
+          tableId: resolvedTableId,
+          tableNumber,
+          customerName: cleanCustomerName,
+          overallRating: clamp(overallRating),
+          foodRating: clamp(foodRating),
+          serviceRating: clamp(serviceRating),
+          comment: comment?.trim().slice(0, 500) || undefined,
           createdAt: new Date().toISOString(),
         };
         snap.reviews.unshift(entry);
+
+        pushNotification(
+          snap,
+          ['owner', 'manager'],
+          entry.overallRating <= 2 ? 'warning' : 'success',
+          `New ${entry.overallRating}★ Guest Review · Table ${tableNumber}`,
+          entry.comment ||
+            `Overall ${entry.overallRating}/5 · Food ${entry.foodRating}/5 · Service ${entry.serviceRating}/5`,
+          'manager',
+          'reviews'
+        );
+
+        appendAudit(
+          snap,
+          { id: 'guest', name: cleanCustomerName || `Table ${tableNumber} Guest`, role: 'customer' },
+          'REVIEW_SUBMITTED',
+          'review',
+          entry.id,
+          undefined,
+          { tableNumber, overallRating: entry.overallRating, foodRating: entry.foodRating, serviceRating: entry.serviceRating }
+        );
+
         return entry;
       });
 
@@ -1536,11 +1608,89 @@ export function createApp(options?: {
         entity: 'review',
         action: 'create',
         recordId: review.id,
+        tableId: review.tableId,
         sessionId: review.sessionId,
       });
       res.status(201).json({ review });
     } catch (err: unknown) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to save review.' });
+    }
+  });
+
+  app.post('/api/reviews/:id/reply', requireAuth, requirePerm('manage_reviews'), async (req: AuthedRequest, res) => {
+    try {
+      const { id } = req.params;
+      const { reply } = req.body as { reply?: string };
+      const cleanReply = reply?.trim().slice(0, 500);
+      if (!cleanReply) {
+        return res.status(400).json({ error: 'Reply message is required.' });
+      }
+
+      const updated = await mutateSnapshot((snap) => {
+        snap.reviews ||= [];
+        const idx = snap.reviews.findIndex((r) => r.id === id);
+        if (idx === -1) throw new Error('Review not found.');
+        const existing = snap.reviews[idx];
+        const next = {
+          ...existing,
+          managerReply: cleanReply,
+          repliedBy: req.staff!.name,
+          repliedAt: new Date().toISOString(),
+        };
+        snap.reviews[idx] = next;
+        appendAudit(
+          snap,
+          req.staff!,
+          'REVIEW_REPLIED',
+          'review',
+          next.id,
+          undefined,
+          { tableNumber: next.tableNumber }
+        );
+        return next;
+      });
+
+      broadcastEvent('snapshot:updated', {
+        reason: 'review_replied',
+        entity: 'review',
+        action: 'update',
+        recordId: updated.id,
+        tableId: updated.tableId,
+      });
+      res.json({ review: updated });
+    } catch (err: unknown) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to save review reply.' });
+    }
+  });
+
+  app.delete('/api/reviews/:id', requireAuth, requirePerm('manage_reviews'), async (req: AuthedRequest, res) => {
+    try {
+      const { id } = req.params;
+      await mutateSnapshot((snap) => {
+        snap.reviews ||= [];
+        const idx = snap.reviews.findIndex((r) => r.id === id);
+        if (idx === -1) throw new Error('Review not found.');
+        const [removed] = snap.reviews.splice(idx, 1);
+        appendAudit(
+          snap,
+          req.staff!,
+          'REVIEW_DELETED',
+          'review',
+          id,
+          undefined,
+          { tableNumber: removed.tableNumber }
+        );
+      });
+
+      broadcastEvent('snapshot:updated', {
+        reason: 'review_deleted',
+        entity: 'review',
+        action: 'delete',
+        recordId: id,
+      });
+      res.json({ ok: true });
+    } catch (err: unknown) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to delete review.' });
     }
   });
 

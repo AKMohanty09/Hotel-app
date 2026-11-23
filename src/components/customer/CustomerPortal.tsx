@@ -1,16 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
+  ArrowUpDown,
   Bell,
   CheckCircle2,
   ChefHat,
   Clock,
   CreditCard,
+  Flame,
   Minus,
   Moon,
   Plus,
   Receipt,
   RefreshCw,
+  RotateCcw,
   Search,
   ShieldCheck,
   ShoppingBag,
@@ -30,6 +33,17 @@ import type {
   ServiceRequestType,
 } from '../../types/domain';
 import { downloadBillPdf } from '../../lib/exportUtils';
+import {
+  countActiveMenuFilters,
+  DEFAULT_MENU_FILTERS,
+  filterAndSortMenuItems,
+  getMenuItemPriceRange,
+  itemNeedsCustomizationPopup,
+  type DietaryFilter,
+  type MenuFilterState,
+  type MenuSortOption,
+  type SpiceFilter,
+} from '../../lib/menuFilterUtils';
 import { CustomerMenuSkeleton } from '../common/Skeleton';
 import { RealtimeStatusBadge } from '../common/RealtimeWidgets';
 
@@ -80,12 +94,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   const [toast, setToast] = useState('');
 
   const [activeTab, setActiveTab] = useState<'menu' | 'orders' | 'service' | 'bill'>('menu');
-  const [selectedCategory, setSelectedCategory] = useState<string>('all');
-  const [vegOnly, setVegOnly] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-
-  // Selected size variant per item on dish cards
-  const [selectedVariantByItem, setSelectedVariantByItem] = useState<Record<string, string>>({});
+  const [menuFilters, setMenuFilters] = useState<MenuFilterState>(DEFAULT_MENU_FILTERS);
 
   // Detail modal state
   const [detailItem, setDetailItem] = useState<MenuItem | null>(null);
@@ -120,15 +129,17 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   const [overallRating, setOverallRating] = useState(5);
   const [foodRating, setFoodRating] = useState(5);
   const [serviceRating, setServiceRating] = useState(5);
+  const [reviewCustomerName, setReviewCustomerName] = useState('');
   const [reviewComment, setReviewComment] = useState('');
   const [reviewSubmitted, setReviewSubmitted] = useState(false);
+  const [submittingReview, setSubmittingReview] = useState(false);
   const [realtimeStatus, setRealtimeStatus] = useState<RealtimeConnectionStatus>('reconnecting');
 
   const loadBootstrap = useCallback(async () => {
     try {
       const savedSes = sessionStorage.getItem(sessionStorageKey) || undefined;
       const res = await api.getCustomerTable(qrToken, savedSes);
-      setData(res);
+      let nextData = res;
       if (res.settings.defaultTheme) {
         onSyncDefaultTheme?.(res.settings.defaultTheme);
       }
@@ -138,25 +149,26 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
       } else if (savedSes) {
         const check = await api.getPublicSession(savedSes).catch(() => null);
         if (check?.session) {
-          setData((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  activeSession: check.session,
-                  sessionOrders: check.orders,
-                  sessionBill: check.bill,
-                  serviceRequests: check.serviceRequests,
-                }
-              : prev
-          );
+          nextData = {
+            ...res,
+            activeSession: check.session,
+            sessionOrders: check.orders,
+            sessionBill: check.bill,
+            serviceRequests: check.serviceRequests,
+            sessionReview: check.review ?? res.sessionReview ?? null,
+          };
         } else {
           sessionStorage.removeItem(sessionStorageKey);
           setSessionId(null);
         }
       }
-      if (res.pendingRequest) {
-        setRequestId(res.pendingRequest.id);
-        sessionStorage.setItem(reqStorageKey, res.pendingRequest.id);
+      setData(nextData);
+      if (nextData.sessionReview) {
+        setReviewSubmitted(true);
+      }
+      if (nextData.pendingRequest) {
+        setRequestId(nextData.pendingRequest.id);
+        sessionStorage.setItem(reqStorageKey, nextData.pendingRequest.id);
       }
       setError('');
     } catch (err) {
@@ -196,29 +208,20 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   const getActiveVariant = useCallback(
     (item: MenuItem, explicitVariantId?: string) => {
       if (!item.variants || item.variants.length === 0) return undefined;
-      const chosenId = explicitVariantId ?? selectedVariantByItem[item.id];
-      return item.variants.find((v) => v.id === chosenId) || item.variants[0];
+      return item.variants.find((v) => v.id === explicitVariantId) || item.variants[0];
     },
-    [selectedVariantByItem]
+    []
   );
 
   const filteredItems = useMemo(() => {
     if (!data) return [];
-    return data.menuItems.filter((item) => {
-      if (selectedCategory !== 'all' && item.categoryId !== selectedCategory) return false;
-      if (vegOnly && item.vegType === 'non_veg') return false;
-      if (searchQuery.trim()) {
-        const q = searchQuery.trim().toLowerCase();
-        if (
-          !item.name.toLowerCase().includes(q) &&
-          !item.description.toLowerCase().includes(q)
-        ) {
-          return false;
-        }
-      }
-      return true;
-    });
-  }, [data, selectedCategory, vegOnly, searchQuery]);
+    return filterAndSortMenuItems(data.menuItems, menuFilters);
+  }, [data, menuFilters]);
+
+  const activeFilterCount = useMemo(
+    () => countActiveMenuFilters(menuFilters),
+    [menuFilters]
+  );
 
   const cartTotals = useMemo(() => {
     if (!data) return { subtotal: 0, tax: 0, service: 0, total: 0, count: 0 };
@@ -421,19 +424,26 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
 
   const handleSubmitReview = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!data?.activeSession) return;
+    if (!data) return;
+    setSubmittingReview(true);
     try {
-      await api.submitReview({
-        sessionId: data.activeSession.id,
+      const res = await api.submitReview({
+        sessionId: data.activeSession?.id,
+        qrToken: data.table.qrToken,
+        customerName: reviewCustomerName.trim() || undefined,
         overallRating,
         foodRating,
         serviceRating,
         comment: reviewComment,
       });
       setReviewSubmitted(true);
+      setData((prev) => (prev ? { ...prev, sessionReview: res.review } : prev));
       showToast('Thank you for your feedback!');
+      await loadBootstrap();
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Unable to submit review');
+    } finally {
+      setSubmittingReview(false);
     }
   };
 
@@ -623,40 +633,193 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
               </div>
             </section>
 
-            {/* Search & Dietary Filters */}
-            <div className="flex flex-col sm:flex-row gap-2.5 sm:gap-3">
-              <div className="relative flex-1">
-                <Search className="pointer-events-none absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
-                <input
-                  type="search"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search dishes, wood-fired pizzas, beverages..."
-                  className="w-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 pl-10 pr-4 py-2.5 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-orange-500 focus:outline-none"
-                />
+            {/* Search, Dietary & Catalogue Filters */}
+            <section
+              aria-label="Menu search and filters"
+              className="rounded-2xl sm:rounded-3xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900/90 p-3 sm:p-4 space-y-3 shadow-sm"
+            >
+              {/* Search Bar + Quick Sort */}
+              <div className="flex flex-col sm:flex-row gap-2.5">
+                <div className="relative flex-1">
+                  <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                  <input
+                    type="search"
+                    aria-label="Search menu items"
+                    value={menuFilters.search}
+                    onChange={(e) =>
+                      setMenuFilters((prev) => ({ ...prev, search: e.target.value }))
+                    }
+                    placeholder="Search dishes, pizzas, sizes, or item code..."
+                    className="w-full rounded-xl sm:rounded-2xl border border-slate-200 dark:border-dusk bg-slate-50/70 dark:bg-obsidian pl-10 pr-9 py-2.5 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-royal focus:outline-none"
+                  />
+                  {menuFilters.search && (
+                    <button
+                      type="button"
+                      aria-label="Clear search"
+                      onClick={() => setMenuFilters((prev) => ({ ...prev, search: '' }))}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-lg p-1 text-slate-400 hover:bg-slate-200/70 dark:hover:bg-plum/50 hover:text-slate-700 dark:hover:text-mist"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Sort Select */}
+                <div className="relative sm:w-52 shrink-0">
+                  <ArrowUpDown className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
+                  <select
+                    aria-label="Sort menu items"
+                    value={menuFilters.sortBy}
+                    onChange={(e) =>
+                      setMenuFilters((prev) => ({
+                        ...prev,
+                        sortBy: e.target.value as MenuSortOption,
+                      }))
+                    }
+                    className="w-full appearance-none rounded-xl sm:rounded-2xl border border-slate-200 dark:border-dusk bg-slate-50/70 dark:bg-obsidian pl-8 pr-8 py-2.5 text-xs sm:text-sm font-medium text-slate-800 dark:text-slate-100 focus:border-royal focus:outline-none"
+                  >
+                    <option value="default">Sort: Recommended</option>
+                    <option value="price_asc">Price: Low to High</option>
+                    <option value="price_desc">Price: High to Low</option>
+                    <option value="prep_asc">Prep Time: Fastest</option>
+                  </select>
+                </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setVegOnly((v) => !v)}
-                className={`rounded-2xl border px-4 py-2.5 text-xs font-semibold whitespace-nowrap transition-colors ${
-                  vegOnly
-                    ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300'
-                    : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
-                }`}
-              >
-                {vegOnly ? 'Showing Veg / Vegan Only' : 'All Dietary Types'}
-              </button>
-            </div>
+
+              {/* Dietary Segmented Pills + Additional Filters */}
+              <div className="flex flex-wrap items-center gap-2">
+                {(
+                  [
+                    { id: 'all', label: 'All Items' },
+                    { id: 'veg', label: 'Veg' },
+                    { id: 'non_veg', label: 'Non-Veg' },
+                    { id: 'vegan', label: 'Vegan' },
+                  ] as const
+                ).map((diet) => {
+                  const active = menuFilters.dietary === diet.id;
+                  return (
+                    <button
+                      key={diet.id}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() =>
+                        setMenuFilters((prev) => ({
+                          ...prev,
+                          dietary: diet.id as DietaryFilter,
+                        }))
+                      }
+                      className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                        active
+                          ? diet.id === 'non_veg'
+                            ? 'border-red-600 bg-red-50 dark:bg-red-950/60 text-red-700 dark:text-red-300'
+                            : diet.id === 'veg' || diet.id === 'vegan'
+                            ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
+                            : 'border-royal bg-royal text-white shadow-sm'
+                          : 'border-slate-200 dark:border-dusk bg-white dark:bg-slate-800/70 text-slate-700 dark:text-mist hover:bg-slate-50 dark:hover:bg-plum/40'
+                      }`}
+                    >
+                      {diet.id === 'veg' && (
+                        <span className="inline-flex h-3 w-3 items-center justify-center rounded-[3px] border border-emerald-600 bg-white dark:bg-slate-900">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-600" />
+                        </span>
+                      )}
+                      {diet.id === 'non_veg' && (
+                        <span className="inline-flex h-3 w-3 items-center justify-center rounded-[3px] border border-red-600 bg-white dark:bg-slate-900">
+                          <span className="h-1.5 w-1.5 rounded-full bg-red-600" />
+                        </span>
+                      )}
+                      {diet.id === 'vegan' && (
+                        <span className="inline-flex h-3 w-3 items-center justify-center rounded-[3px] border border-teal-600 bg-white dark:bg-slate-900">
+                          <span className="h-1.5 w-1.5 rounded-full bg-teal-600" />
+                        </span>
+                      )}
+                      <span>{diet.label}</span>
+                    </button>
+                  );
+                })}
+
+                {/* Spice Level Filter */}
+                <div className="relative">
+                  <Flame className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-amber-500" />
+                  <select
+                    aria-label="Filter by spice level"
+                    value={menuFilters.spiceLevel}
+                    onChange={(e) =>
+                      setMenuFilters((prev) => ({
+                        ...prev,
+                        spiceLevel: e.target.value as SpiceFilter,
+                      }))
+                    }
+                    className="rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-800/70 pl-7 pr-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-mist focus:border-royal focus:outline-none"
+                  >
+                    <option value="all">Spice: Any</option>
+                    <option value="None">No Spice</option>
+                    <option value="Mild">Mild</option>
+                    <option value="Medium">Medium</option>
+                    <option value="Spicy">Spicy</option>
+                    <option value="Extra Hot">Extra Hot</option>
+                  </select>
+                </div>
+
+                <button
+                  type="button"
+                  aria-pressed={menuFilters.featuredOnly}
+                  onClick={() =>
+                    setMenuFilters((prev) => ({ ...prev, featuredOnly: !prev.featuredOnly }))
+                  }
+                  className={`inline-flex items-center gap-1 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                    menuFilters.featuredOnly
+                      ? 'border-amber-500 bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300'
+                      : 'border-slate-200 dark:border-dusk bg-white dark:bg-slate-800/70 text-slate-700 dark:text-mist hover:bg-slate-50 dark:hover:bg-plum/40'
+                  }`}
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  Chef Specials
+                </button>
+
+                <button
+                  type="button"
+                  aria-pressed={menuFilters.availableOnly}
+                  onClick={() =>
+                    setMenuFilters((prev) => ({ ...prev, availableOnly: !prev.availableOnly }))
+                  }
+                  className={`inline-flex items-center gap-1 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                    menuFilters.availableOnly
+                      ? 'border-royal bg-royal/10 dark:bg-royal/30 text-royal dark:text-mist'
+                      : 'border-slate-200 dark:border-dusk bg-white dark:bg-slate-800/70 text-slate-700 dark:text-mist hover:bg-slate-50 dark:hover:bg-plum/40'
+                  }`}
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  In Stock Only
+                </button>
+
+                <div className="ml-auto flex items-center gap-2 text-xs text-slate-500 dark:text-lavender">
+                  <span>
+                    {filteredItems.length} dish{filteredItems.length === 1 ? '' : 'es'}
+                  </span>
+                  {activeFilterCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setMenuFilters(DEFAULT_MENU_FILTERS)}
+                      className="inline-flex items-center gap-1 rounded-xl border border-slate-200 dark:border-dusk bg-slate-100 dark:bg-obsidian px-2.5 py-1 text-xs font-semibold text-slate-700 dark:text-mist hover:bg-slate-200 dark:hover:bg-plum/50"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      Reset ({activeFilterCount})
+                    </button>
+                  )}
+                </div>
+              </div>
+            </section>
 
             {/* Category Selector */}
             <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
               <button
                 type="button"
-                onClick={() => setSelectedCategory('all')}
+                onClick={() => setMenuFilters((prev) => ({ ...prev, categoryId: 'all' }))}
                 className={`rounded-2xl px-4 py-2 text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
-                  selectedCategory === 'all'
-                    ? 'bg-slate-900 dark:bg-orange-600 text-white shadow-sm'
-                    : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                  menuFilters.categoryId === 'all'
+                    ? 'bg-slate-900 dark:bg-royal text-white shadow-sm'
+                    : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-dusk text-slate-700 dark:text-mist hover:bg-slate-50 dark:hover:bg-plum/40'
                 }`}
               >
                 All Categories
@@ -665,11 +828,11 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                 <button
                   key={cat.id}
                   type="button"
-                  onClick={() => setSelectedCategory(cat.id)}
+                  onClick={() => setMenuFilters((prev) => ({ ...prev, categoryId: cat.id }))}
                   className={`rounded-2xl px-4 py-2 text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
-                    selectedCategory === cat.id
-                      ? 'bg-slate-900 dark:bg-orange-600 text-white shadow-sm'
-                      : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                    menuFilters.categoryId === cat.id
+                      ? 'bg-slate-900 dark:bg-royal text-white shadow-sm'
+                      : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-dusk text-slate-700 dark:text-mist hover:bg-slate-50 dark:hover:bg-plum/40'
                   }`}
                 >
                   {cat.name}
@@ -677,137 +840,170 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
               ))}
             </div>
 
-            {/* Menu Grid */}
+            {/* 2-Column Catalogue Menu Grid */}
             {filteredItems.length === 0 ? (
-              <div className="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-10 text-center text-sm text-slate-500 dark:text-slate-400">
-                No dishes match your current filter.
+              <div className="rounded-3xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900 p-10 text-center text-sm text-slate-500 dark:text-slate-400">
+                <p>No dishes match your current filters.</p>
+                {activeFilterCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setMenuFilters(DEFAULT_MENU_FILTERS)}
+                    className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-royal px-4 py-2 text-xs font-semibold text-white hover:bg-plum transition-colors"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Reset Filters
+                  </button>
+                )}
               </div>
             ) : (
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="grid grid-cols-2 gap-2.5 sm:gap-4" data-testid="menu-catalogue-grid">
                 {filteredItems.map((item) => {
                   const soldOut = !item.isAvailable || item.isTemporarilySoldOut;
                   const variants = item.variants || [];
-                  const activeVariant = getActiveVariant(item);
-                  const displayPrice = activeVariant ? activeVariant.price : item.price;
+                  const modifiers = item.modifiers || [];
+                  const priceRange = getMenuItemPriceRange(item);
+                  const needsPopup = itemNeedsCustomizationPopup(item);
 
                   return (
                     <article
                       key={item.id}
-                      className="group flex flex-col overflow-hidden rounded-3xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm hover:shadow-md transition-shadow"
+                      data-testid="menu-item-card"
+                      className="group flex flex-col overflow-hidden rounded-2xl sm:rounded-3xl border border-slate-200/90 dark:border-dusk bg-white dark:bg-slate-900 shadow-sm hover:shadow-md hover:border-royal/40 dark:hover:border-lavender/40 transition-all"
                     >
-                      <div className="relative aspect-[16/10] sm:aspect-[4/3] w-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                        <img
-                          src={item.photoUrl}
-                          alt={item.name}
-                          referrerPolicy="no-referrer"
-                          className={`h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03] ${
-                            soldOut ? 'opacity-50 grayscale' : ''
-                          }`}
-                        />
-                        {item.isFeatured && !soldOut && (
-                          <span className="absolute top-3 left-3 inline-flex items-center gap-1 rounded-xl bg-slate-950/75 backdrop-blur-sm px-2.5 py-1 text-[11px] font-semibold text-amber-300">
-                            <Sparkles className="h-3 w-3" />
-                            Chef Special
-                          </span>
-                        )}
-                        {soldOut && (
-                          <div className="absolute inset-0 flex items-center justify-center bg-slate-950/60 text-xs font-semibold text-white">
-                            Temporarily Sold Out
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="flex flex-1 flex-col justify-between p-4">
-                        <div>
-                          <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
-                            <span
-                              className={`inline-block h-2.5 w-2.5 rounded-sm border ${
-                                item.vegType === 'non_veg'
-                                  ? 'border-red-600 bg-red-600'
-                                  : 'border-emerald-600 bg-emerald-600'
-                              }`}
-                              aria-label={item.vegType === 'non_veg' ? 'Non-vegetarian' : 'Vegetarian'}
-                            />
-                            <span className="font-medium">
-                              {item.vegType === 'non_veg' ? 'Non-Veg' : item.vegType === 'vegan' ? 'Vegan' : 'Veg'}
+                      <button
+                        type="button"
+                        onClick={() => openDetailModal(item)}
+                        aria-label={`Open ${item.name} options`}
+                        className="flex flex-1 flex-col text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-royal"
+                      >
+                        <div className="relative aspect-[4/3] w-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                          <img
+                            src={item.photoUrl}
+                            alt={item.name}
+                            referrerPolicy="no-referrer"
+                            className={`h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03] ${
+                              soldOut ? 'opacity-50 grayscale' : ''
+                            }`}
+                          />
+                          {item.isFeatured && !soldOut && (
+                            <span className="absolute top-2 left-2 sm:top-3 sm:left-3 inline-flex items-center gap-1 rounded-lg sm:rounded-xl bg-slate-950/75 backdrop-blur-sm px-2 py-0.5 sm:px-2.5 sm:py-1 text-[10px] sm:text-[11px] font-semibold text-amber-300">
+                              <Sparkles className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
+                              <span className="hidden sm:inline">Chef Special</span>
+                              <span className="sm:hidden">Special</span>
                             </span>
-                            <span aria-hidden="true">·</span>
-                            <span>~{item.prepTimeMinutes} min</span>
-                            {item.spiceLevel !== 'None' && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span>{item.spiceLevel}</span>
-                              </>
-                            )}
-                          </div>
-
-                          <h3 className="mt-1.5 font-display text-base font-bold text-slate-900 dark:text-slate-100">
-                            {item.name}
-                          </h3>
-                          <p className="mt-1 text-xs text-slate-600 dark:text-slate-400 line-clamp-2 leading-relaxed">
-                            {item.description}
-                          </p>
-
-                          {/* Interactive Size Selector Pills (e.g. Small / Medium / Large) */}
-                          {variants.length > 0 && (
-                            <div className="mt-3 flex flex-wrap gap-1.5" role="group" aria-label={`Select size for ${item.name}`}>
-                              {variants.map((v) => {
-                                const selected = activeVariant?.id === v.id;
-                                return (
-                                  <button
-                                    key={v.id}
-                                    type="button"
-                                    disabled={soldOut}
-                                    onClick={() =>
-                                      setSelectedVariantByItem((prev) => ({ ...prev, [item.id]: v.id }))
-                                    }
-                                    className={`rounded-xl px-2.5 py-1 text-[11px] font-semibold ${
-                                      selected
-                                        ? 'bg-orange-600 text-white shadow-sm'
-                                        : 'border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:border-orange-400'
-                                    }`}
-                                  >
-                                    {v.name} · {currency}{v.price.toFixed(0)}
-                                  </button>
-                                );
-                              })}
+                          )}
+                          {(variants.length > 0 || modifiers.length > 0) && !soldOut && (
+                            <span className="absolute bottom-2 right-2 rounded-lg bg-slate-950/75 backdrop-blur-sm px-2 py-0.5 text-[10px] font-semibold text-white">
+                              {variants.length > 0
+                                ? `${variants.length} ${variants.length === 1 ? 'variety' : 'varieties'}`
+                                : `${modifiers.length} add-on${modifiers.length === 1 ? '' : 's'}`}
+                            </span>
+                          )}
+                          {soldOut && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-slate-950/60 px-2 text-center text-[11px] sm:text-xs font-semibold text-white">
+                              Temporarily Sold Out
                             </div>
                           )}
                         </div>
 
-                        <div className="mt-4 flex items-center justify-between gap-3 pt-3 border-t border-slate-100 dark:border-slate-800">
-                          <div>
-                            <div className="font-mono text-base font-bold text-slate-900 dark:text-slate-100 tabular-nums">
-                              {currency}{displayPrice.toFixed(0)}
-                            </div>
-                            {activeVariant && (
-                              <div className="text-[10px] font-medium text-orange-600 dark:text-orange-400">
-                                {activeVariant.name}
-                              </div>
+                        <div className="flex flex-1 flex-col p-2.5 sm:p-4 pb-2 sm:pb-3 w-full">
+                          <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400">
+                            <span
+                              className={`inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-[3px] border bg-white dark:bg-slate-900 ${
+                                item.vegType === 'non_veg' ? 'border-red-600' : 'border-emerald-600'
+                              }`}
+                              aria-label={
+                                item.vegType === 'non_veg'
+                                  ? 'Non-vegetarian'
+                                  : item.vegType === 'vegan'
+                                  ? 'Vegan'
+                                  : 'Vegetarian'
+                              }
+                            >
+                              <span
+                                className={`h-1.5 w-1.5 rounded-full ${
+                                  item.vegType === 'non_veg' ? 'bg-red-600' : 'bg-emerald-600'
+                                }`}
+                              />
+                            </span>
+                            <span className="font-medium truncate">
+                              {item.vegType === 'non_veg'
+                                ? 'Non-Veg'
+                                : item.vegType === 'vegan'
+                                ? 'Vegan'
+                                : 'Veg'}
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <span className="shrink-0">~{item.prepTimeMinutes}m</span>
+                            {item.spiceLevel !== 'None' && (
+                              <span className="hidden sm:inline truncate">
+                                · {item.spiceLevel}
+                              </span>
                             )}
                           </div>
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => openDetailModal(item)}
-                              className="min-h-[38px] rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-800 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
-                            >
-                              Details
-                            </button>
-                            <button
-                              type="button"
-                              disabled={soldOut}
-                              onClick={() =>
-                                item.modifiers.length > 0
-                                  ? openDetailModal(item)
-                                  : addToCart(item, [], 1, '', activeVariant?.id)
-                              }
-                              className="min-h-[38px] rounded-xl bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-700 disabled:opacity-40 shadow-sm shadow-orange-600/20"
-                            >
-                              + Add
-                            </button>
+
+                          <h3 className="mt-1 sm:mt-1.5 font-display text-xs sm:text-base font-bold text-slate-900 dark:text-slate-100 line-clamp-2 leading-snug">
+                            {item.name}
+                          </h3>
+                          <p className="mt-1 text-[11px] sm:text-xs text-slate-600 dark:text-slate-400 line-clamp-2 leading-relaxed">
+                            {item.description}
+                          </p>
+
+                          {(variants.length > 0 || modifiers.length > 0) && (
+                            <div className="mt-2 flex flex-wrap items-center gap-1 text-[10px] font-medium text-royal dark:text-lavender">
+                              {variants.length > 0 && (
+                                <span className="rounded-md bg-royal/10 dark:bg-plum/40 px-1.5 py-0.5">
+                                  {variants.length === 1
+                                    ? variants[0].name
+                                    : `${variants.length} sizes`}
+                                </span>
+                              )}
+                              {modifiers.length > 0 && (
+                                <span className="rounded-md bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-slate-600 dark:text-slate-300">
+                                  +{modifiers.length} add-on{modifiers.length === 1 ? '' : 's'}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </button>
+
+                      <div className="mt-auto flex items-center justify-between gap-2 px-2.5 sm:px-4 pb-2.5 sm:pb-4 pt-2 border-t border-slate-100 dark:border-slate-800">
+                        <div className="min-w-0">
+                          <div className="font-mono text-xs sm:text-base font-bold text-slate-900 dark:text-slate-100 tabular-nums truncate">
+                            {priceRange.hasMultiplePrices ? (
+                              <>
+                                <span className="text-[10px] sm:text-xs font-sans font-medium text-slate-500 dark:text-slate-400 mr-0.5">
+                                  From
+                                </span>
+                                {currency}
+                                {priceRange.min.toFixed(0)}
+                              </>
+                            ) : (
+                              <>
+                                {currency}
+                                {priceRange.min.toFixed(0)}
+                              </>
+                            )}
                           </div>
                         </div>
+                        <button
+                          type="button"
+                          disabled={soldOut}
+                          onClick={() =>
+                            needsPopup
+                              ? openDetailModal(item)
+                              : addToCart(item, [], 1, '')
+                          }
+                          aria-label={
+                            needsPopup
+                              ? `Choose options for ${item.name}`
+                              : `Add ${item.name} to cart`
+                          }
+                          className="min-h-[34px] sm:min-h-[38px] shrink-0 rounded-xl bg-orange-600 px-2.5 sm:px-3.5 py-1.5 sm:py-2 text-[11px] sm:text-xs font-semibold text-white hover:bg-orange-700 disabled:opacity-40 shadow-sm shadow-orange-600/20"
+                        >
+                          + Add
+                        </button>
                       </div>
                     </article>
                   );
@@ -992,6 +1188,93 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                 </div>
               </div>
             )}
+
+            {/* Direct Dining Feedback Card */}
+            <div className="rounded-3xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900 p-5">
+              <h3 className="font-display text-base font-bold text-slate-900 dark:text-slate-100">
+                Share Dining Feedback
+              </h3>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Your ratings go directly to the restaurant owner and manager dashboard.
+              </p>
+
+              {reviewSubmitted || data.sessionReview ? (
+                <div className="mt-4 rounded-2xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/50 p-4 space-y-2 text-xs">
+                  <div className="flex items-center gap-2 font-semibold text-emerald-800 dark:text-emerald-300">
+                    <CheckCircle2 className="h-4 w-4" />
+                    Thank you! Your review has been saved.
+                  </div>
+                  {data.sessionReview && (
+                    <div className="text-emerald-900 dark:text-emerald-200 space-y-1">
+                      <div>
+                        Overall: {data.sessionReview.overallRating}/5 · Food: {data.sessionReview.foodRating}/5 · Service: {data.sessionReview.serviceRating}/5
+                      </div>
+                      {data.sessionReview.comment && (
+                        <p className="italic">&ldquo;{data.sessionReview.comment}&rdquo;</p>
+                      )}
+                      {data.sessionReview.managerReply && (
+                        <div className="mt-2 rounded-xl bg-white/80 dark:bg-slate-900/70 p-2.5 text-slate-800 dark:text-slate-200">
+                          <span className="font-semibold">{data.sessionReview.repliedBy || 'Management'}: </span>
+                          {data.sessionReview.managerReply}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <form onSubmit={handleSubmitReview} className="mt-4 space-y-3">
+                  <input
+                    type="text"
+                    value={reviewCustomerName}
+                    onChange={(e) => setReviewCustomerName(e.target.value)}
+                    placeholder="Your name (optional)"
+                    className="w-full rounded-xl border border-slate-300 dark:border-dusk bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-3.5 py-2 text-xs"
+                  />
+                  {(
+                    [
+                      ['Overall Experience', overallRating, setOverallRating],
+                      ['Food Quality', foodRating, setFoodRating],
+                      ['Table Service', serviceRating, setServiceRating],
+                    ] as const
+                  ).map(([label, val, setter]) => (
+                    <div key={label} className="flex items-center justify-between text-xs">
+                      <span className="font-medium text-slate-700 dark:text-slate-300">{label}</span>
+                      <div className="flex gap-1">
+                        {[1, 2, 3, 4, 5].map((star) => (
+                          <button
+                            key={star}
+                            type="button"
+                            aria-label={`${label} ${star} stars`}
+                            onClick={() => setter(star)}
+                            className="p-0.5"
+                          >
+                            <Star
+                              className={`h-4 w-4 ${
+                                star <= val ? 'fill-amber-400 text-amber-500' : 'text-slate-300 dark:text-slate-600'
+                              }`}
+                            />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  <textarea
+                    rows={2}
+                    value={reviewComment}
+                    onChange={(e) => setReviewComment(e.target.value)}
+                    placeholder="Share what you loved or how we can improve..."
+                    className="w-full rounded-xl border border-slate-300 dark:border-dusk bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-3.5 py-2 text-xs"
+                  />
+                  <button
+                    type="submit"
+                    disabled={submittingReview}
+                    className="w-full rounded-xl bg-slate-900 dark:bg-orange-600 py-2.5 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-orange-700 disabled:opacity-50"
+                  >
+                    {submittingReview ? 'Submitting...' : 'Submit Review'}
+                  </button>
+                </form>
+              )}
+            </div>
           </div>
         )}
 
@@ -1161,9 +1444,16 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                         Thank you for dining at {data.settings.name}!
                       </p>
 
-                      {!reviewSubmitted ? (
+                      {!(reviewSubmitted || data.sessionReview) ? (
                         <form onSubmit={handleSubmitReview} className="mt-4 space-y-3 border-t border-emerald-200 dark:border-emerald-800 pt-4">
                           <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Rate Your Experience</h4>
+                          <input
+                            type="text"
+                            value={reviewCustomerName}
+                            onChange={(e) => setReviewCustomerName(e.target.value)}
+                            placeholder="Your name (optional)"
+                            className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-3 py-2 text-xs"
+                          />
                           {(
                             [
                               ['Overall', overallRating, setOverallRating],
@@ -1201,14 +1491,21 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                           />
                           <button
                             type="submit"
-                            className="w-full rounded-xl bg-slate-900 dark:bg-orange-600 py-2.5 text-xs font-semibold text-white"
+                            disabled={submittingReview}
+                            className="w-full rounded-xl bg-slate-900 dark:bg-orange-600 py-2.5 text-xs font-semibold text-white disabled:opacity-50"
                           >
-                            Submit Feedback
+                            {submittingReview ? 'Submitting...' : 'Submit Feedback'}
                           </button>
                         </form>
                       ) : (
-                        <div className="mt-4 text-xs font-medium text-emerald-800 dark:text-emerald-300">
-                          Feedback saved. We hope to welcome you again soon!
+                        <div className="mt-4 space-y-2 border-t border-emerald-200 dark:border-emerald-800 pt-3 text-xs font-medium text-emerald-800 dark:text-emerald-300">
+                          <div>Feedback saved. We hope to welcome you again soon!</div>
+                          {data.sessionReview?.managerReply && (
+                            <div className="rounded-xl bg-white/80 dark:bg-slate-900/70 p-2.5 text-slate-800 dark:text-slate-200 font-normal">
+                              <span className="font-semibold">{data.sessionReview.repliedBy || 'Management'}: </span>
+                              {data.sessionReview.managerReply}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1285,10 +1582,35 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
 
       {/* Dish Detail / Size & Customization Bottom Sheet Modal */}
       {detailItem && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/65 sm:p-4" role="dialog" aria-modal="true">
-          <div className="w-full max-w-lg rounded-t-3xl sm:rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 max-h-[90vh] overflow-y-auto p-6">
-            <div className="flex items-start justify-between gap-4">
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/65 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={detailItem.name}
+        >
+          <div className="w-full max-w-lg rounded-t-3xl sm:rounded-3xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 dark:border-slate-800 px-5 sm:px-6 pt-5 pb-3.5 shrink-0">
               <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span
+                    className={`inline-flex h-3.5 w-3.5 items-center justify-center rounded-[3px] border bg-white dark:bg-slate-900 ${
+                      detailItem.vegType === 'non_veg' ? 'border-red-600' : 'border-emerald-600'
+                    }`}
+                  >
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${
+                        detailItem.vegType === 'non_veg' ? 'bg-red-600' : 'bg-emerald-600'
+                      }`}
+                    />
+                  </span>
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-lavender">
+                    {detailItem.vegType === 'non_veg'
+                      ? 'Non-Veg'
+                      : detailItem.vegType === 'vegan'
+                      ? 'Vegan'
+                      : 'Veg'}
+                  </span>
+                </div>
                 <h3 className="font-display text-lg font-bold">{detailItem.name}</h3>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
                   {detailActiveVariant ? detailActiveVariant.name : detailItem.portionSize} · Spice: {detailItem.spiceLevel} · ~{detailItem.prepTimeMinutes} min
@@ -1304,103 +1626,108 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
               </button>
             </div>
 
-            <img
-              src={detailItem.photoUrl}
-              alt={detailItem.name}
-              referrerPolicy="no-referrer"
-              className="mt-4 aspect-[16/9] w-full rounded-2xl object-cover"
-            />
-            <p className="mt-3 text-sm text-slate-600 dark:text-slate-400 leading-relaxed">{detailItem.description}</p>
-            {detailItem.allergens.length > 0 && (
-              <p className="mt-2 text-xs text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/50 rounded-xl px-3 py-1.5">
-                Allergens: {detailItem.allergens.join(', ')}
-              </p>
-            )}
-
-            {/* Size Variants Picker */}
-            {detailItem.variants && detailItem.variants.length > 0 && (
-              <div className="mt-4">
-                <h4 className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">
-                  Choose Size / Portion
-                </h4>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {detailItem.variants.map((v) => {
-                    const selected = detailActiveVariant?.id === v.id;
-                    return (
-                      <button
-                        key={v.id}
-                        type="button"
-                        onClick={() => setDetailVariantId(v.id)}
-                        className={`rounded-2xl border px-3 py-2.5 text-left transition-all ${
-                          selected
-                            ? 'border-orange-600 bg-orange-50 dark:bg-orange-950/50 text-orange-700 dark:text-orange-300 ring-1 ring-orange-600'
-                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 hover:border-slate-300'
-                        }`}
-                      >
-                        <div className="text-xs font-semibold truncate">{v.name}</div>
-                        <div className="font-mono text-sm font-bold mt-0.5">
-                          {currency}{v.price.toFixed(0)}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {detailItem.modifiers.length > 0 && (
-              <div className="mt-4">
-                <h4 className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">
-                  Customizations &amp; Add-ons
-                </h4>
-                <div className="space-y-2">
-                  {detailItem.modifiers.map((mod) => {
-                    const checked = detailModifiers.includes(mod.id);
-                    return (
-                      <label
-                        key={mod.id}
-                        className="flex items-center justify-between rounded-2xl border border-slate-200 dark:border-slate-700 px-3.5 py-2.5 text-sm cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800"
-                      >
-                        <span className="flex items-center gap-2.5">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() =>
-                              setDetailModifiers((prev) =>
-                                checked ? prev.filter((id) => id !== mod.id) : [...prev, mod.id]
-                              )
-                            }
-                            className="h-4 w-4 accent-orange-600"
-                          />
-                          <span>
-                            {mod.groupName ? `${mod.groupName}: ` : ''}
-                            {mod.name}
-                          </span>
-                        </span>
-                        <span className="font-mono text-xs text-slate-600 dark:text-slate-400">
-                          +{currency}{mod.priceDelta}
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            <div className="mt-4">
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                Kitchen Instructions (optional)
-              </label>
-              <input
-                type="text"
-                value={detailInstructions}
-                onChange={(e) => setDetailInstructions(e.target.value)}
-                placeholder="e.g. No onions, extra crispy"
-                className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2 text-sm"
+            <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-4 space-y-4">
+              <img
+                src={detailItem.photoUrl}
+                alt={detailItem.name}
+                referrerPolicy="no-referrer"
+                className="h-40 sm:h-48 w-full rounded-2xl object-cover"
               />
+              <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+                {detailItem.description}
+              </p>
+              {detailItem.allergens.length > 0 && (
+                <p className="text-xs text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/50 rounded-xl px-3 py-1.5">
+                  Allergens: {detailItem.allergens.join(', ')}
+                </p>
+              )}
+
+              {/* Variety / Size Picker (shown for single or multiple varieties) */}
+              {detailItem.variants && detailItem.variants.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">
+                    Select Variety / Size
+                  </h4>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {detailItem.variants.map((v) => {
+                      const selected = detailActiveVariant?.id === v.id;
+                      return (
+                        <button
+                          key={v.id}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() => setDetailVariantId(v.id)}
+                          className={`rounded-2xl border px-3 py-2.5 text-left transition-all ${
+                            selected
+                              ? 'border-orange-600 bg-orange-50 dark:bg-orange-950/50 text-orange-700 dark:text-orange-300 ring-1 ring-orange-600'
+                              : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 hover:border-slate-300'
+                          }`}
+                        >
+                          <div className="text-xs font-semibold truncate">{v.name}</div>
+                          <div className="font-mono text-sm font-bold mt-0.5">
+                            {currency}{v.price.toFixed(0)}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {detailItem.modifiers.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">
+                    Customizations &amp; Add-ons
+                  </h4>
+                  <div className="space-y-2">
+                    {detailItem.modifiers.map((mod) => {
+                      const checked = detailModifiers.includes(mod.id);
+                      return (
+                        <label
+                          key={mod.id}
+                          className="flex items-center justify-between rounded-2xl border border-slate-200 dark:border-slate-700 px-3.5 py-2.5 text-sm cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800"
+                        >
+                          <span className="flex items-center gap-2.5">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() =>
+                                setDetailModifiers((prev) =>
+                                  checked ? prev.filter((id) => id !== mod.id) : [...prev, mod.id]
+                                )
+                              }
+                              className="h-4 w-4 accent-orange-600"
+                            />
+                            <span>
+                              {mod.groupName ? `${mod.groupName}: ` : ''}
+                              {mod.name}
+                            </span>
+                          </span>
+                          <span className="font-mono text-xs text-slate-600 dark:text-slate-400">
+                            +{currency}{mod.priceDelta}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                  Kitchen Instructions (optional)
+                </label>
+                <input
+                  type="text"
+                  value={detailInstructions}
+                  onChange={(e) => setDetailInstructions(e.target.value)}
+                  placeholder="e.g. No onions, extra crispy"
+                  className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2 text-sm"
+                />
+              </div>
             </div>
 
-            <div className="mt-5 flex items-center justify-between gap-4 border-t border-slate-100 dark:border-slate-800 pt-4">
+            <div className="shrink-0 flex items-center justify-between gap-4 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 px-5 sm:px-6 py-4">
               <div className="flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 p-1">
                 <button
                   type="button"

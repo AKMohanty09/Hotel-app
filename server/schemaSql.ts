@@ -411,12 +411,17 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 CREATE TABLE IF NOT EXISTS restaurant_reviews (
   id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
+  session_id TEXT,
+  table_id TEXT,
   table_number TEXT NOT NULL,
-  overall_rating INTEGER NOT NULL,
-  food_rating INTEGER NOT NULL,
-  service_rating INTEGER NOT NULL,
+  customer_name TEXT,
+  overall_rating INTEGER NOT NULL CHECK (overall_rating BETWEEN 1 AND 5),
+  food_rating INTEGER NOT NULL CHECK (food_rating BETWEEN 1 AND 5),
+  service_rating INTEGER NOT NULL CHECK (service_rating BETWEEN 1 AND 5),
   comment TEXT,
+  manager_reply TEXT,
+  replied_by TEXT,
+  replied_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -427,6 +432,8 @@ CREATE INDEX IF NOT EXISTS idx_kitchen_tickets_order_id ON kitchen_tickets (orde
 CREATE INDEX IF NOT EXISTS idx_bills_session_id ON bills (session_id);
 CREATE INDEX IF NOT EXISTS idx_payments_bill_id ON payments (bill_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_restaurant_reviews_created_at ON restaurant_reviews (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_restaurant_reviews_session_id ON restaurant_reviews (session_id);
 `;
 
 export const CORE_TABLES_SQLITE_DDL = CORE_TABLES_PG_DDL
