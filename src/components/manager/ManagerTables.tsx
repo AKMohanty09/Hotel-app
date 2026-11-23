@@ -279,6 +279,7 @@ export const ManagerTables: React.FC<ManagerTablesProps> = ({
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             type="button"
+            disabled={activeNonArchived.length === 0}
             onClick={() =>
               void downloadTablesQrPdf(
                 activeNonArchived,
@@ -287,13 +288,14 @@ export const ManagerTables: React.FC<ManagerTablesProps> = ({
                 'a4-grid'
               )
             }
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-45 whitespace-nowrap"
           >
             <Printer className="h-3.5 w-3.5" />
             Bulk A4 QR PDF
           </button>
           <button
             type="button"
+            disabled={activeNonArchived.length === 0}
             onClick={() =>
               void downloadTablesQrPdf(
                 activeNonArchived,
@@ -302,7 +304,7 @@ export const ManagerTables: React.FC<ManagerTablesProps> = ({
                 'compact-labels'
               )
             }
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-45 whitespace-nowrap"
           >
             <FileDown className="h-3.5 w-3.5" />
             Compact Labels PDF
@@ -319,6 +321,26 @@ export const ManagerTables: React.FC<ManagerTablesProps> = ({
       </div>
 
       {/* Table Grid */}
+      {visibleTables.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-slate-300 dark:border-dusk bg-white dark:bg-slate-900 p-10 text-center space-y-3">
+          <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+            {showArchived ? 'No archived tables' : 'No dining tables created yet'}
+          </p>
+          <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+            Add your restaurant&apos;s tables to generate permanent table QR codes for guest menu scanning and waiter verification.
+          </p>
+          {!showArchived && (
+            <button
+              type="button"
+              onClick={openCreateModal}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-orange-700"
+            >
+              <Plus className="h-4 w-4" />
+              Add Your First Table
+            </button>
+          )}
+        </div>
+      ) : (
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {visibleTables.map((table) => {
           const activeSession = snapshot.sessions.find(
@@ -481,6 +503,7 @@ export const ManagerTables: React.FC<ManagerTablesProps> = ({
           );
         })}
       </div>
+      )}
 
       {/* Create / Edit Modal */}
       {editorOpen && (

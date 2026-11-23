@@ -56,6 +56,10 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
 
 export interface AuthStatusResponse {
   adminClaimed: boolean;
+  ownerRegistered?: boolean;
+  needsSupabaseSchema?: boolean;
+  needsFullDatabaseSchema?: boolean;
+  needsSupabaseServiceRoleKey?: boolean;
   restaurantName: string;
   logoUrl: string;
 }
@@ -86,25 +90,43 @@ export interface CustomerTableBootstrap {
 }
 
 export const api = {
-  // Auth
+  // Auth & Setup
   getAuthStatus: () => requestJson<AuthStatusResponse>('/api/auth/status'),
-  claimAdmin: (passcode: string) =>
-    requestJson<{ token: string; staff: StaffProfile }>('/api/auth/claim-admin', {
+  getSupabaseSchemaSql: () => requestJson<{ sql: string }>('/api/setup/supabase-schema'),
+  registerOwner: (payload: {
+    restaurantName: string;
+    ownerName: string;
+    email: string;
+    mobile?: string;
+    photoUrl?: string;
+    passcode: string;
+  }) =>
+    requestJson<{ token: string; staff: StaffProfile }>('/api/auth/register-owner', {
       method: 'POST',
-      body: JSON.stringify({ passcode }),
+      body: JSON.stringify(payload),
+    }),
+  uploadMedia: (payload: {
+    dataUrl: string;
+    category: 'staff' | 'menu_item' | 'logo';
+    entityId?: string;
+    fileName?: string;
+  }) =>
+    requestJson<{ id: string; url: string; mimeType: string; byteSize: number }>('/api/media/upload', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
   login: (identifier: string, passcode: string) =>
     requestJson<{ token: string; staff: StaffProfile }>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ identifier, passcode }),
     }),
-  exchangeFirebaseToken: (idToken: string) =>
-    requestJson<{ token: string; staff: StaffProfile }>('/api/auth/firebase-exchange', {
-      method: 'POST',
-      body: JSON.stringify({ idToken }),
-    }),
   getMe: () => requestJson<{ staff: StaffProfile }>('/api/auth/me'),
   logout: () => requestJson<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  updateProfile: (payload: { email?: string; name?: string; mobile?: string; photoUrl?: string }) =>
+    requestJson<{ staff: StaffProfile }>('/api/auth/profile', {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
   resetPassword: (newPasscode: string, targetStaffId?: string) =>
     requestJson<{ ok: boolean }>('/api/auth/reset-password', {
       method: 'POST',
@@ -311,6 +333,7 @@ export const api = {
     name: string;
     email: string;
     mobile?: string;
+    photoUrl?: string;
     role: StaffRole;
     section?: string;
     kitchenStationId?: string;

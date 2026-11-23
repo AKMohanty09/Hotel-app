@@ -19,7 +19,7 @@ import type {
   MenuItemVariant,
   RestaurantSnapshot,
 } from '../../types/domain';
-import { compressImageFileToDataUrl } from '../../lib/imageUtils';
+import { uploadImageFileToDatabase } from '../../lib/imageUtils';
 
 interface ManagerMenuAndInventoryProps {
   snapshot: RestaurantSnapshot;
@@ -146,14 +146,16 @@ export const ManagerMenuAndInventory: React.FC<ManagerMenuAndInventoryProps> = (
     if (!file) return;
     setUploadingPhoto(true);
     try {
-      const dataUrl = await compressImageFileToDataUrl(file, {
+      const uploadedUrl = await uploadImageFileToDatabase(file, 'menu_item', {
         maxDimension: 800,
         preferPng: false,
         quality: 0.84,
+        entityId: editingItem?.id,
       });
-      setDishPhoto(dataUrl);
+      setDishPhoto(uploadedUrl);
+      notify('Dish image uploaded to database storage.');
     } catch (err) {
-      notify(err instanceof Error ? err.message : 'Unable to process dish photo.');
+      notify(err instanceof Error ? err.message : 'Unable to upload dish photo.');
     } finally {
       setUploadingPhoto(false);
       if (dishPhotoInputRef.current) dishPhotoInputRef.current.value = '';
@@ -171,7 +173,11 @@ export const ManagerMenuAndInventory: React.FC<ManagerMenuAndInventoryProps> = (
 
   const handleSaveDish = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!dishName.trim() || !dishCat) return;
+    if (!dishName.trim()) return;
+    if (!dishCat) {
+      notify('Please create a Menu Category first before adding a dish.');
+      return;
+    }
     setSavingDish(true);
     try {
       const cleanVariants = dishVariants
@@ -327,6 +333,18 @@ export const ManagerMenuAndInventory: React.FC<ManagerMenuAndInventoryProps> = (
         </div>
 
         {/* Menu Items Grid */}
+        {filteredItems.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-10 text-center space-y-3">
+            <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+              {snapshot.menuItems.length === 0 ? 'No menu dishes added yet' : 'No matching dishes found'}
+            </p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+              {snapshot.categories.length === 0
+                ? 'Start by adding your first Menu Category above, then create dishes with sizes, modifiers, and kitchen routing.'
+                : 'Click Add Menu Dish above to publish items to Waiter POS and Customer QR menus.'}
+            </p>
+          </div>
+        ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {filteredItems.map((item) => {
             const station = snapshot.stations.find((s) => s.id === item.stationId);
@@ -420,6 +438,7 @@ export const ManagerMenuAndInventory: React.FC<ManagerMenuAndInventoryProps> = (
             );
           })}
         </div>
+        )}
 
         {/* Create/Edit Menu Item Modal */}
         {itemModalOpen && (
@@ -832,74 +851,82 @@ export const ManagerMenuAndInventory: React.FC<ManagerMenuAndInventoryProps> = (
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {snapshot.inventory.map((inv) => {
-                  const low = inv.currentStock <= inv.minStock;
-                  const qty = adjustQty[inv.id] ?? '5';
-                  const mType = adjustType[inv.id] ?? 'in';
-                  return (
-                    <tr key={inv.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40">
-                      <td className="px-4 py-3">
-                        <div className="font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
-                          {inv.name}
-                          {low && <AlertTriangle className="h-3.5 w-3.5 text-red-600" />}
-                        </div>
-                        <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                          {inv.sku} {inv.expiryDate ? `· Exp: ${inv.expiryDate}` : ''}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-slate-600 dark:text-slate-400">{inv.category}</td>
-                      <td className={`px-4 py-3 font-mono font-bold ${low ? 'text-red-600 dark:text-red-400' : 'text-slate-900 dark:text-slate-100'}`}>
-                        {inv.currentStock} {inv.unit}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-slate-500 dark:text-slate-400">
-                        {inv.minStock} {inv.unit}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-slate-700 dark:text-slate-300">
-                        {cur}{inv.costPerUnit}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="inline-flex items-center gap-1.5">
-                          <select
-                            value={mType}
-                            onChange={(e) =>
-                              setAdjustType((prev) => ({
-                                ...prev,
-                                [inv.id]: e.target.value as InventoryMovement['type'],
-                              }))
-                            }
-                            className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-2 py-1 text-[11px]"
-                          >
-                            <option value="in">Stock In (+)</option>
-                            <option value="out">Usage (-)</option>
-                            <option value="wastage">Wastage (-)</option>
-                            <option value="expiry">Expiry (-)</option>
-                          </select>
-                          <input
-                            type="number"
-                            min={0.5}
-                            step="0.5"
-                            value={qty}
-                            onChange={(e) =>
-                              setAdjustQty((prev) => ({ ...prev, [inv.id]: e.target.value }))
-                            }
-                            className="w-16 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-2 py-1 text-[11px] font-mono"
-                          />
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              await api.adjustInventory(inv.id, mType, Number(qty), `${mType} entry`);
-                              notify(`Recorded ${mType} of ${qty} ${inv.unit} for ${inv.name}.`);
-                              await onRefresh();
-                            }}
-                            className="rounded-lg bg-slate-900 dark:bg-orange-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-slate-800"
-                          >
-                            Apply
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+                {snapshot.inventory.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
+                      No inventory ingredients added yet. Click &ldquo;Add Ingredient&rdquo; to track stock levels.
+                    </td>
+                  </tr>
+                ) : (
+                  snapshot.inventory.map((inv) => {
+                    const low = inv.currentStock <= inv.minStock;
+                    const qty = adjustQty[inv.id] ?? '5';
+                    const mType = adjustType[inv.id] ?? 'in';
+                    return (
+                      <tr key={inv.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40">
+                        <td className="px-4 py-3">
+                          <div className="font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+                            {inv.name}
+                            {low && <AlertTriangle className="h-3.5 w-3.5 text-red-600" />}
+                          </div>
+                          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                            {inv.sku} {inv.expiryDate ? `· Exp: ${inv.expiryDate}` : ''}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-slate-600 dark:text-slate-400">{inv.category}</td>
+                        <td className={`px-4 py-3 font-mono font-bold ${low ? 'text-red-600 dark:text-red-400' : 'text-slate-900 dark:text-slate-100'}`}>
+                          {inv.currentStock} {inv.unit}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-slate-500 dark:text-slate-400">
+                          {inv.minStock} {inv.unit}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-slate-700 dark:text-slate-300">
+                          {cur}{inv.costPerUnit}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <div className="inline-flex items-center gap-1.5">
+                            <select
+                              value={mType}
+                              onChange={(e) =>
+                                setAdjustType((prev) => ({
+                                  ...prev,
+                                  [inv.id]: e.target.value as InventoryMovement['type'],
+                                }))
+                              }
+                              className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-2 py-1 text-[11px]"
+                            >
+                              <option value="in">Stock In (+)</option>
+                              <option value="out">Usage (-)</option>
+                              <option value="wastage">Wastage (-)</option>
+                              <option value="expiry">Expiry (-)</option>
+                            </select>
+                            <input
+                              type="number"
+                              min={0.5}
+                              step="0.5"
+                              value={qty}
+                              onChange={(e) =>
+                                setAdjustQty((prev) => ({ ...prev, [inv.id]: e.target.value }))
+                              }
+                              className="w-16 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-2 py-1 text-[11px] font-mono"
+                            />
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                await api.adjustInventory(inv.id, mType, Number(qty), `${mType} entry`);
+                                notify(`Recorded ${mType} of ${qty} ${inv.unit} for ${inv.name}.`);
+                                await onRefresh();
+                              }}
+                              className="rounded-lg bg-slate-900 dark:bg-orange-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-slate-800"
+                            >
+                              Apply
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
               </tbody>
             </table>
           </div>
@@ -927,107 +954,135 @@ export const ManagerMenuAndInventory: React.FC<ManagerMenuAndInventoryProps> = (
 
       {invSubTab === 'suppliers' && (
         <div className="grid gap-4 md:grid-cols-2">
-          {snapshot.suppliers.map((sup) => (
-            <div key={sup.id} className="rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900 p-5 text-xs space-y-1.5">
-              <div className="font-semibold text-sm text-slate-900 dark:text-slate-100">{sup.name}</div>
-              <div className="text-slate-600 dark:text-slate-300">Contact: {sup.contactName} · {sup.phone}</div>
-              <div className="text-slate-500 dark:text-slate-400">{sup.email} · Specialty: {sup.category}</div>
+          {snapshot.suppliers.length === 0 ? (
+            <div className="md:col-span-2 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-8 text-center text-xs text-slate-500 dark:text-slate-400">
+              No suppliers configured yet.
             </div>
-          ))}
+          ) : (
+            snapshot.suppliers.map((sup) => (
+              <div key={sup.id} className="rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900 p-5 text-xs space-y-1.5">
+                <div className="font-semibold text-sm text-slate-900 dark:text-slate-100">{sup.name}</div>
+                <div className="text-slate-600 dark:text-slate-300">Contact: {sup.contactName} · {sup.phone}</div>
+                <div className="text-slate-500 dark:text-slate-400">{sup.email} · Specialty: {sup.category}</div>
+              </div>
+            ))
+          )}
         </div>
       )}
 
       {invSubTab === 'pos' && (
         <div className="space-y-4">
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              await api.createPurchaseOrder(poSupplierId, poItemId, Number(poQty));
-              notify('Purchase Order created.');
-              await onRefresh();
-            }}
-            className="rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900 p-4 flex flex-wrap items-end gap-3 text-xs"
-          >
-            <div>
-              <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1">Supplier</label>
-              <select
-                value={poSupplierId}
-                onChange={(e) => setPoSupplierId(e.target.value)}
-                className="rounded-xl border border-slate-300 dark:border-dusk bg-white dark:bg-slate-800 px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
-              >
-                {snapshot.suppliers.map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
-                ))}
-              </select>
+          {snapshot.suppliers.length === 0 || snapshot.inventory.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-6 text-center text-xs text-slate-500 dark:text-slate-400">
+              Add at least one inventory ingredient and supplier before issuing a purchase order.
             </div>
-            <div>
-              <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1">Ingredient</label>
-              <select
-                value={poItemId}
-                onChange={(e) => setPoItemId(e.target.value)}
-                className="rounded-xl border border-slate-300 dark:border-dusk bg-white dark:bg-slate-800 px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
-              >
-                {snapshot.inventory.map((i) => (
-                  <option key={i.id} value={i.id}>{i.name} ({i.unit})</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1">Quantity</label>
-              <input
-                type="number"
-                min={1}
-                value={poQty}
-                onChange={(e) => setPoQty(Number(e.target.value))}
-                className="w-24 rounded-xl border border-slate-300 dark:border-dusk bg-white dark:bg-slate-800 px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
-              />
-            </div>
-            <button
-              type="submit"
-              className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 dark:bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-orange-700"
+          ) : (
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!poSupplierId || !poItemId) {
+                  notify('Please select both a supplier and an ingredient.');
+                  return;
+                }
+                await api.createPurchaseOrder(poSupplierId, poItemId, Number(poQty));
+                notify('Purchase Order created.');
+                await onRefresh();
+              }}
+              className="rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900 p-4 flex flex-wrap items-end gap-3 text-xs"
             >
-              <ShoppingCart className="h-3.5 w-3.5" />
-              Issue PO
-            </button>
-          </form>
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1">Supplier</label>
+                <select
+                  value={poSupplierId}
+                  onChange={(e) => setPoSupplierId(e.target.value)}
+                  className="rounded-xl border border-slate-300 dark:border-dusk bg-white dark:bg-slate-800 px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
+                >
+                  {snapshot.suppliers.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1">Ingredient</label>
+                <select
+                  value={poItemId}
+                  onChange={(e) => setPoItemId(e.target.value)}
+                  className="rounded-xl border border-slate-300 dark:border-dusk bg-white dark:bg-slate-800 px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
+                >
+                  {snapshot.inventory.map((i) => (
+                    <option key={i.id} value={i.id}>{i.name} ({i.unit})</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1">Quantity</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={poQty}
+                  onChange={(e) => setPoQty(Number(e.target.value))}
+                  className="w-24 rounded-xl border border-slate-300 dark:border-dusk bg-white dark:bg-slate-800 px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
+                />
+              </div>
+              <button
+                type="submit"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 dark:bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-orange-700"
+              >
+                <ShoppingCart className="h-3.5 w-3.5" />
+                Issue PO
+              </button>
+            </form>
+          )}
 
           <div className="rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900 divide-y divide-slate-100 dark:divide-slate-800">
-            {snapshot.purchaseOrders.map((po) => (
-              <div key={po.id} className="p-4 flex items-center justify-between text-xs">
-                <div>
-                  <div className="font-mono font-semibold text-slate-900 dark:text-slate-100">{po.poNumber}</div>
-                  <div className="text-slate-600 dark:text-slate-400 mt-0.5">
-                    {po.supplierName} · {po.items.map((i) => `${i.quantity} ${i.itemName}`).join(', ')}
+            {snapshot.purchaseOrders.length === 0 ? (
+              <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400">
+                No purchase orders issued yet.
+              </div>
+            ) : (
+              snapshot.purchaseOrders.map((po) => (
+                <div key={po.id} className="p-4 flex items-center justify-between text-xs">
+                  <div>
+                    <div className="font-mono font-semibold text-slate-900 dark:text-slate-100">{po.poNumber}</div>
+                    <div className="text-slate-600 dark:text-slate-400 mt-0.5">
+                      {po.supplierName} · {po.items.map((i) => `${i.quantity} ${i.itemName}`).join(', ')}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="font-mono font-bold text-slate-900 dark:text-slate-100">{cur}{po.totalCost.toFixed(2)}</div>
+                    <div className="uppercase text-[11px] text-orange-700 dark:text-amethyst">{po.status}</div>
                   </div>
                 </div>
-                <div className="text-right">
-                  <div className="font-mono font-bold text-slate-900 dark:text-slate-100">{cur}{po.totalCost.toFixed(2)}</div>
-                  <div className="uppercase text-[11px] text-orange-700 dark:text-amethyst">{po.status}</div>
-                </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
       )}
 
       {invSubTab === 'recipes' && (
         <div className="grid gap-4 md:grid-cols-2">
-          {snapshot.recipes.map((rec) => (
-            <div key={rec.id} className="rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900 p-5 space-y-2.5 text-xs">
-              <div className="flex items-center gap-2 font-semibold text-sm text-slate-900 dark:text-slate-100">
-                <BookOpen className="h-4 w-4 text-orange-600 dark:text-amethyst" />
-                {rec.menuItemName}
-              </div>
-              <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                {rec.ingredients.map((ing) => (
-                  <div key={ing.inventoryItemId} className="py-1.5 flex justify-between">
-                    <span className="text-slate-700 dark:text-slate-300">{ing.ingredientName}</span>
-                    <span className="font-mono text-slate-900 dark:text-slate-100">{ing.quantity} {ing.unit}</span>
-                  </div>
-                ))}
-              </div>
+          {snapshot.recipes.length === 0 ? (
+            <div className="md:col-span-2 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-8 text-center text-xs text-slate-500 dark:text-slate-400">
+              No dish recipes mapped yet.
             </div>
-          ))}
+          ) : (
+            snapshot.recipes.map((rec) => (
+              <div key={rec.id} className="rounded-xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900 p-5 space-y-2.5 text-xs">
+                <div className="flex items-center gap-2 font-semibold text-sm text-slate-900 dark:text-slate-100">
+                  <BookOpen className="h-4 w-4 text-orange-600 dark:text-amethyst" />
+                  {rec.menuItemName}
+                </div>
+                <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {rec.ingredients.map((ing) => (
+                    <div key={ing.inventoryItemId} className="py-1.5 flex justify-between">
+                      <span className="text-slate-700 dark:text-slate-300">{ing.ingredientName}</span>
+                      <span className="font-mono text-slate-900 dark:text-slate-100">{ing.quantity} {ing.unit}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))
+          )}
         </div>
       )}
 

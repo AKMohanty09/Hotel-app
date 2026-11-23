@@ -59,3 +59,20 @@ export async function compressImageFileToDataUrl(
   const quality = options.quality ?? 0.84;
   return canvas.toDataURL(mime, quality);
 }
+
+export async function uploadImageFileToDatabase(
+  file: File,
+  category: 'staff' | 'menu_item' | 'logo',
+  options: { maxDimension?: number; preferPng?: boolean; quality?: number; entityId?: string } = {}
+): Promise<string> {
+  const dataUrl = await compressImageFileToDataUrl(file, options);
+  const { api } = await import('../services/api');
+  const uploaded = await api.uploadMedia({
+    dataUrl,
+    category,
+    entityId: options.entityId,
+    fileName: file.name,
+  });
+  return uploaded.url;
+}
+

@@ -1,41 +1,31 @@
 import crypto from 'node:crypto';
 import { canResendOtp, evaluateOtpChallenge } from '../src/lib/otpRules.ts';
-
-interface OtpSecretRecord {
-  requestId: string;
-  tableId: string;
-  otpHash: string;
-  otpPlainForWaiterRevealOnly: string;
-  salt: string;
-  expiresAtMs: number;
-  lastSentAtMs: number;
-  attempts: number;
-  maxAttempts: number;
-  used: boolean;
-  presenceConfirmed: boolean;
-  waiterId?: string;
-}
-
-const otpStore = new Map<string, OtpSecretRecord>();
-const tableRateLimit = new Map<string, number[]>();
+import {
+  deleteOtpChallenge,
+  getOtpChallenge,
+  getOtpTableRateTimestamps,
+  saveOtpChallenge,
+  saveOtpTableRateTimestamps,
+} from './db.ts';
 
 function hashOtp(otp: string, salt: string): string {
   return crypto.createHash('sha256').update(`${salt}:${otp}`).digest('hex');
 }
 
-export function issueOtpForRequest(params: {
+export async function issueOtpForRequest(params: {
   requestId: string;
   tableId: string;
   expirySeconds: number;
   cooldownSeconds: number;
   maxAttempts: number;
   isResend?: boolean;
-}): { ok: true; expiresAt: string } | { ok: false; error: string; retryAfterSeconds?: number } {
+}): Promise<{ ok: true; expiresAt: string } | { ok: false; error: string; retryAfterSeconds?: number }> {
   const now = Date.now();
 
-  // Rate-limit: max 5 requests per table in 10 minutes
+  // Rate-limit: max 8 requests per table in 10 minutes (persisted across serverless calls)
   const windowMs = 10 * 60 * 1000;
-  const recent = (tableRateLimit.get(params.tableId) || []).filter((t) => now - t < windowMs);
+  const storedTimestamps = await getOtpTableRateTimestamps(params.tableId);
+  const recent = storedTimestamps.filter((t) => now - t < windowMs);
   if (recent.length >= 8) {
     return {
       ok: false,
@@ -44,7 +34,7 @@ export function issueOtpForRequest(params: {
     };
   }
 
-  const existing = otpStore.get(params.requestId);
+  const existing = await getOtpChallenge(params.requestId);
   if (existing && params.isResend) {
     const resendCheck = canResendOtp(existing.lastSentAtMs, now, params.cooldownSeconds);
     if (!resendCheck.allowed) {
@@ -61,7 +51,7 @@ export function issueOtpForRequest(params: {
   const salt = crypto.randomBytes(16).toString('hex');
   const expiresAtMs = now + params.expirySeconds * 1000;
 
-  otpStore.set(params.requestId, {
+  await saveOtpChallenge({
     requestId: params.requestId,
     tableId: params.tableId,
     otpHash: hashOtp(otp, salt),
@@ -77,7 +67,7 @@ export function issueOtpForRequest(params: {
   });
 
   recent.push(now);
-  tableRateLimit.set(params.tableId, recent);
+  await saveOtpTableRateTimestamps(params.tableId, recent);
 
   return {
     ok: true,
@@ -85,11 +75,11 @@ export function issueOtpForRequest(params: {
   };
 }
 
-export function confirmPresenceAndRevealOtp(
+export async function confirmPresenceAndRevealOtp(
   requestId: string,
   waiterId: string
-): { ok: true; otp: string; expiresAt: string } | { ok: false; error: string } {
-  const record = otpStore.get(requestId);
+): Promise<{ ok: true; otp: string; expiresAt: string } | { ok: false; error: string }> {
+  const record = await getOtpChallenge(requestId);
   if (!record) {
     return { ok: false, error: 'Verification request not found or expired on server.' };
   }
@@ -102,6 +92,7 @@ export function confirmPresenceAndRevealOtp(
 
   record.presenceConfirmed = true;
   record.waiterId = waiterId;
+  await saveOtpChallenge(record);
   return {
     ok: true,
     otp: record.otpPlainForWaiterRevealOnly,
@@ -109,11 +100,11 @@ export function confirmPresenceAndRevealOtp(
   };
 }
 
-export function verifyOtpSubmission(
+export async function verifyOtpSubmission(
   requestId: string,
   submittedOtp: string
-): { ok: true } | { ok: false; error: string; remainingAttempts: number } {
-  const record = otpStore.get(requestId);
+): Promise<{ ok: true } | { ok: false; error: string; remainingAttempts: number }> {
+  const record = await getOtpChallenge(requestId);
   if (!record) {
     return {
       ok: false,
@@ -145,6 +136,7 @@ export function verifyOtpSubmission(
   if (!evalResult.allowed) {
     if (record.presenceConfirmed && !record.used && now <= record.expiresAtMs) {
       record.attempts += 1;
+      await saveOtpChallenge(record);
     }
     return {
       ok: false,
@@ -156,9 +148,10 @@ export function verifyOtpSubmission(
   // One-time use: burn OTP immediately upon success
   record.used = true;
   record.otpPlainForWaiterRevealOnly = '';
+  await saveOtpChallenge(record);
   return { ok: true };
 }
 
-export function invalidateOtpRequest(requestId: string): void {
-  otpStore.delete(requestId);
+export async function invalidateOtpRequest(requestId: string): Promise<void> {
+  await deleteOtpChallenge(requestId);
 }

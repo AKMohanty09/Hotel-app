@@ -39,6 +39,7 @@ export const WaiterPortal: React.FC<WaiterPortalProps> = ({
 
   // Manual order builder
   const [orderTableId, setOrderTableId] = useState(snapshot.tables[0]?.id || '');
+  const activeOrderTableId = orderTableId || snapshot.tables[0]?.id || '';
   const [orderItems, setOrderItems] = useState<
     { menuItemId: string; variantId?: string; variantName?: string; quantity: number; instructions: string }[]
   >([]);
@@ -183,11 +184,11 @@ export const WaiterPortal: React.FC<WaiterPortalProps> = ({
   };
 
   const handleSubmitManualOrder = async () => {
-    if (!orderTableId || orderItems.length === 0) return;
+    if (!activeOrderTableId || orderItems.length === 0) return;
     setBusyId('manual_order');
     try {
       const res = await api.createStaffOrder({
-        tableId: orderTableId,
+        tableId: activeOrderTableId,
         channel: 'waiter',
         items: orderItems.map((line) => ({
           menuItemId: line.menuItemId,
@@ -611,15 +612,19 @@ export const WaiterPortal: React.FC<WaiterPortalProps> = ({
                 </h2>
                 <select
                   aria-label="Select table for manual order"
-                  value={orderTableId}
+                  value={activeOrderTableId}
                   onChange={(e) => setOrderTableId(e.target.value)}
                   className="rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 px-3.5 py-2 text-sm font-medium"
                 >
-                  {snapshot.tables.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      Table {t.tableNumber} ({t.status})
-                    </option>
-                  ))}
+                  {snapshot.tables.length === 0 ? (
+                    <option value="">No tables available</option>
+                  ) : (
+                    snapshot.tables.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        Table {t.tableNumber} ({t.status})
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
 

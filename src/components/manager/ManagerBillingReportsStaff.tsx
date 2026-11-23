@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Camera,
   CreditCard,
   Download,
   FileText,
   Lock,
+  Mail,
   Monitor,
   Moon,
   Plus,
@@ -29,7 +31,8 @@ import {
   downloadReportPdf,
 } from '../../lib/exportUtils';
 import { hasPermission } from '../../lib/permissions';
-import { compressImageFileToDataUrl } from '../../lib/imageUtils';
+import { uploadImageFileToDatabase } from '../../lib/imageUtils';
+import { StaffAvatar } from '../common/StaffAvatar';
 
 const DEFAULT_LOGO_URL = '/src/assets/images/restaurant_emblem_1795406025250.jpg';
 
@@ -71,12 +74,20 @@ export const ManagerBillingReportsStaff: React.FC<ManagerBillingReportsStaffProp
   const [stName, setStName] = useState('');
   const [stEmail, setStEmail] = useState('');
   const [stMobile, setStMobile] = useState('');
+  const [stPhotoUrl, setStPhotoUrl] = useState('');
   const [stRole, setStRole] = useState<StaffRole>('waiter');
   const [stSection, setStSection] = useState(snapshot.settings.sections[0] || 'Main Hall');
   const [stShift, setStShift] = useState<StaffProfile['shift']>('Evening');
   const [stPasscode, setStPasscode] = useState('');
+  const [uploadingStaffPhotoId, setUploadingStaffPhotoId] = useState<string | null>(null);
   const [resetTarget, setResetTarget] = useState<StaffProfile | null>(null);
   const [resetPasscode, setResetPasscode] = useState('');
+  const [editEmailTarget, setEditEmailTarget] = useState<StaffProfile | null>(null);
+  const [editEmailValue, setEditEmailValue] = useState('');
+  const [ownerEmailInput, setOwnerEmailInput] = useState(
+    snapshot.staff.find((s) => s.role === 'owner')?.email || currentStaff.email
+  );
+  const [savingOwnerEmail, setSavingOwnerEmail] = useState(false);
 
   // Settings form
   const [setName, setSetName] = useState(snapshot.settings.name);
@@ -97,10 +108,14 @@ export const ManagerBillingReportsStaff: React.FC<ManagerBillingReportsStaffProp
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const logoInputRef = useRef<HTMLInputElement | null>(null);
 
+  const currentOwnerEmail =
+    snapshot.staff.find((s) => s.role === 'owner')?.email || currentStaff.email;
+
   useEffect(() => {
     setSetLogoUrl(snapshot.settings.logoUrl || DEFAULT_LOGO_URL);
     setSetDefaultTheme(snapshot.settings.defaultTheme || 'system');
-  }, [snapshot.settings.logoUrl, snapshot.settings.defaultTheme]);
+    setOwnerEmailInput(currentOwnerEmail);
+  }, [snapshot.settings.logoUrl, snapshot.settings.defaultTheme, currentOwnerEmail]);
 
   // Reports filter
   const [reportChannel, setReportChannel] = useState('all');
@@ -560,9 +575,14 @@ export const ManagerBillingReportsStaff: React.FC<ManagerBillingReportsStaffProp
               {snapshot.staff.map((st) => (
                 <tr key={st.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/50">
                   <td className="px-4 py-3">
-                    <div className="font-semibold text-slate-900 dark:text-slate-100">{st.name}</div>
-                    <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
-                      {st.employeeId} · {st.email}
+                    <div className="flex items-center gap-3">
+                      <StaffAvatar name={st.name} photoUrl={st.photoUrl} size="sm" />
+                      <div className="min-w-0">
+                        <div className="font-semibold text-slate-900 dark:text-slate-100 truncate">{st.name}</div>
+                        <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                          {st.employeeId} · {st.email}
+                        </div>
+                      </div>
                     </div>
                   </td>
                   <td className="px-4 py-3">
@@ -610,16 +630,65 @@ export const ManagerBillingReportsStaff: React.FC<ManagerBillingReportsStaffProp
                     </select>
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setResetTarget(st);
-                        setResetPasscode('');
-                      }}
-                      className="rounded-lg border border-slate-200 dark:border-dusk px-2.5 py-1 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-                    >
-                      Reset Passcode
-                    </button>
+                    <div className="inline-flex items-center justify-end gap-1.5">
+                      {(st.role !== 'owner' || currentStaff.role === 'owner') && (
+                        <label className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-slate-200 dark:border-dusk px-2.5 py-1 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800">
+                          <Camera className="h-3 w-3" />
+                          <span>{uploadingStaffPhotoId === st.id ? 'Saving...' : st.photoUrl ? 'Photo' : 'Add Photo'}</span>
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                            aria-label={`Upload profile photo for ${st.name}`}
+                            disabled={uploadingStaffPhotoId === st.id}
+                            className="hidden"
+                            onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              setUploadingStaffPhotoId(st.id);
+                              try {
+                                const url = await uploadImageFileToDatabase(file, 'staff', {
+                                  maxDimension: 400,
+                                  preferPng: false,
+                                  quality: 0.84,
+                                  entityId: st.id,
+                                });
+                                await api.updateStaff(st.id, { photoUrl: url });
+                                notify(`Profile photo updated for ${st.name}.`);
+                                await onRefresh();
+                              } catch (err) {
+                                notify(err instanceof Error ? err.message : 'Unable to upload staff photo.');
+                              } finally {
+                                setUploadingStaffPhotoId(null);
+                              }
+                            }}
+                          />
+                        </label>
+                      )}
+                      {(st.role !== 'owner' || currentStaff.role === 'owner') && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditEmailTarget(st);
+                            setEditEmailValue(st.email);
+                          }}
+                          className="rounded-lg border border-slate-200 dark:border-dusk px-2.5 py-1 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                        >
+                          Edit Email
+                        </button>
+                      )}
+                      {(st.role !== 'owner' || currentStaff.role === 'owner') && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setResetTarget(st);
+                            setResetPasscode('');
+                          }}
+                          className="rounded-lg border border-slate-200 dark:border-dusk px-2.5 py-1 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                        >
+                          Reset Passcode
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -638,6 +707,7 @@ export const ManagerBillingReportsStaff: React.FC<ManagerBillingReportsStaffProp
                     name: stName,
                     email: stEmail,
                     mobile: stMobile,
+                    photoUrl: stPhotoUrl || undefined,
                     role: stRole,
                     section: stSection,
                     shift: stShift,
@@ -647,6 +717,7 @@ export const ManagerBillingReportsStaff: React.FC<ManagerBillingReportsStaffProp
                   setStName('');
                   setStEmail('');
                   setStMobile('');
+                  setStPhotoUrl('');
                   setStPasscode('');
                   notify('Staff account created.');
                   await onRefresh();
@@ -657,6 +728,43 @@ export const ManagerBillingReportsStaff: React.FC<ManagerBillingReportsStaffProp
               className="w-full max-w-md rounded-2xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900 p-6 shadow-xl space-y-3 text-xs"
             >
               <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">Create Staff Account</h3>
+              <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 dark:border-dusk bg-slate-50 dark:bg-slate-800/60 p-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <StaffAvatar name={stName || 'Staff'} photoUrl={stPhotoUrl || undefined} size="md" />
+                  <div className="min-w-0">
+                    <div className="font-semibold text-slate-800 dark:text-slate-100">Profile Photo (Optional)</div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">Stored in database media</div>
+                  </div>
+                </div>
+                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-orange-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-slate-800 shrink-0">
+                  <Camera className="h-3.5 w-3.5" />
+                  <span>{uploadingStaffPhotoId === 'new' ? 'Uploading...' : stPhotoUrl ? 'Change' : 'Upload Photo'}</span>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                    aria-label="Upload new staff profile photo"
+                    disabled={uploadingStaffPhotoId === 'new'}
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      setUploadingStaffPhotoId('new');
+                      try {
+                        const url = await uploadImageFileToDatabase(file, 'staff', {
+                          maxDimension: 400,
+                          preferPng: false,
+                          quality: 0.84,
+                        });
+                        setStPhotoUrl(url);
+                      } catch (err) {
+                        notify(err instanceof Error ? err.message : 'Unable to upload staff photo.');
+                      } finally {
+                        setUploadingStaffPhotoId(null);
+                      }
+                    }}
+                  />
+                </label>
+              </div>
               <div>
                 <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1">Full Name</label>
                 <input
@@ -729,6 +837,56 @@ export const ManagerBillingReportsStaff: React.FC<ManagerBillingReportsStaffProp
                 >
                   <Plus className="h-4 w-4" />
                   Create Staff
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {/* Edit Staff / Owner Email Modal */}
+        {editEmailTarget && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 p-4" role="dialog" aria-modal="true">
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                try {
+                  await api.updateStaff(editEmailTarget.id, { email: editEmailValue });
+                  notify(`Updated email ID for ${editEmailTarget.name}.`);
+                  setEditEmailTarget(null);
+                  await onRefresh();
+                } catch (err) {
+                  notify(err instanceof Error ? err.message : 'Unable to update email ID.');
+                }
+              }}
+              className="w-full max-w-sm rounded-2xl border border-slate-200 dark:border-dusk bg-white dark:bg-slate-900 p-6 shadow-xl space-y-3 text-xs"
+            >
+              <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                Change Email ID · {editEmailTarget.name}
+              </h3>
+              <p className="text-slate-500 dark:text-slate-400">
+                This updates the sign-in email ID for {editEmailTarget.employeeId}.
+              </p>
+              <input
+                type="email"
+                required
+                value={editEmailValue}
+                onChange={(e) => setEditEmailValue(e.target.value)}
+                placeholder="name@restaurant.com"
+                className="w-full rounded-xl border border-slate-300 dark:border-dusk bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
+              />
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setEditEmailTarget(null)}
+                  className="rounded-xl border border-slate-200 dark:border-dusk px-4 py-2 text-sm text-slate-700 dark:text-slate-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-xl bg-slate-900 dark:bg-orange-600 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 dark:hover:bg-orange-700"
+                >
+                  Save Email
                 </button>
               </div>
             </form>
@@ -820,14 +978,15 @@ export const ManagerBillingReportsStaff: React.FC<ManagerBillingReportsStaffProp
     if (!file) return;
     setUploadingLogo(true);
     try {
-      const dataUrl = await compressImageFileToDataUrl(file, {
+      const uploadedUrl = await uploadImageFileToDatabase(file, 'logo', {
         maxDimension: 512,
         preferPng: true,
         quality: 0.9,
+        entityId: 'rest_main',
       });
-      setSetLogoUrl(dataUrl);
-      await api.updateSettings({ logoUrl: dataUrl });
-      notify('Restaurant logo uploaded and published across all portals & QR cards.');
+      setSetLogoUrl(uploadedUrl);
+      await api.updateSettings({ logoUrl: uploadedUrl });
+      notify('Restaurant logo uploaded to database and published across all portals.');
       await onRefresh();
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Unable to upload logo image.');
@@ -878,6 +1037,48 @@ export const ManagerBillingReportsStaff: React.FC<ManagerBillingReportsStaffProp
           Changes apply immediately across the header, receipts, table QR cards, and customer menu.
         </p>
       </div>
+
+      {currentStaff.role === 'owner' && (
+        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 p-4 space-y-2.5">
+          <div className="flex items-center gap-2 font-semibold text-sm text-slate-900 dark:text-slate-100">
+            <Mail className="h-4 w-4 text-orange-600 dark:text-amethyst" />
+            Owner Account Email ID
+          </div>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+            Used for Owner sign-in and workspace recovery ({currentStaff.employeeId}).
+          </p>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              type="email"
+              value={ownerEmailInput}
+              onChange={(e) => setOwnerEmailInput(e.target.value)}
+              placeholder="owner@restaurant.com"
+              className="min-w-0 flex-1 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
+            />
+            <button
+              type="button"
+              disabled={savingOwnerEmail}
+              onClick={async () => {
+                setSavingOwnerEmail(true);
+                try {
+                  const res = await api.updateProfile({ email: ownerEmailInput });
+                  setOwnerEmailInput(res.staff.email);
+                  notify(`Owner email ID updated to ${res.staff.email}.`);
+                  await onRefresh();
+                } catch (err) {
+                  notify(err instanceof Error ? err.message : 'Unable to update Owner email.');
+                } finally {
+                  setSavingOwnerEmail(false);
+                }
+              }}
+              className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-slate-900 dark:bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-orange-700 disabled:opacity-50 shrink-0"
+            >
+              <Mail className="h-3.5 w-3.5" />
+              {savingOwnerEmail ? 'Updating...' : 'Update Owner Email'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Restaurant Logo Uploader */}
       <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">

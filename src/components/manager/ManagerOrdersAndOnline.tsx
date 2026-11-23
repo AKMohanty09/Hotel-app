@@ -52,6 +52,7 @@ export const ManagerOrdersAndOnline: React.FC<ManagerOrdersAndOnlineProps> = ({
   // Online sandbox integration state
   const [simPlatform, setSimPlatform] = useState<'swiggy' | 'zomato'>('swiggy');
   const [simDishId, setSimDishId] = useState(snapshot.menuItems[0]?.id || '');
+  const activeSimDishId = simDishId || snapshot.menuItems[0]?.id || '';
   const [simQty, setSimQty] = useState(1);
   const [simNotes, setSimNotes] = useState('Tamper-evident seal + cutlery');
   const [simBusy, setSimBusy] = useState(false);
@@ -151,11 +152,11 @@ export const ManagerOrdersAndOnline: React.FC<ManagerOrdersAndOnlineProps> = ({
 
   const handleSimulateOnlineOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!simDishId) return;
+    if (!activeSimDishId) return;
     setSimBusy(true);
     try {
       const res = await api.simulateOnlineOrder(simPlatform, {
-        items: [{ menuItemId: simDishId, quantity: simQty }],
+        items: [{ menuItemId: activeSimDishId, quantity: simQty }],
         packagingNotes: simNotes,
       });
       notify(
@@ -224,15 +225,20 @@ export const ManagerOrdersAndOnline: React.FC<ManagerOrdersAndOnlineProps> = ({
               <div>
                 <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Menu Dish</label>
                 <select
-                  value={simDishId}
+                  value={activeSimDishId}
                   onChange={(e) => setSimDishId(e.target.value)}
-                  className="w-full rounded-xl border border-slate-300 dark:border-dusk bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
+                  disabled={snapshot.menuItems.length === 0}
+                  className="w-full rounded-xl border border-slate-300 dark:border-dusk bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 disabled:opacity-60"
                 >
-                  {snapshot.menuItems.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name} ({cur}{m.price})
-                    </option>
-                  ))}
+                  {snapshot.menuItems.length === 0 ? (
+                    <option value="">Add menu dishes first</option>
+                  ) : (
+                    snapshot.menuItems.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({cur}{m.price})
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
               <div>

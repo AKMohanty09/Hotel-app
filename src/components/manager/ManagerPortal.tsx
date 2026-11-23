@@ -21,6 +21,7 @@ import { ManagerTables } from './ManagerTables';
 import { ManagerOrdersAndOnline } from './ManagerOrdersAndOnline';
 import { ManagerMenuAndInventory } from './ManagerMenuAndInventory';
 import { ManagerBillingReportsStaff } from './ManagerBillingReportsStaff';
+import { StaffAvatar } from '../common/StaffAvatar';
 import { KitchenPortal } from '../kitchen/KitchenPortal';
 
 interface ManagerPortalProps {
@@ -186,9 +187,12 @@ export const ManagerPortal: React.FC<ManagerPortalProps> = ({
           })}
         </nav>
 
-        <div className="border-t border-slate-800 p-4 text-[11px] text-slate-400">
-          <div className="font-medium text-slate-200 truncate">{currentStaff.name}</div>
-          <div className="uppercase tracking-wider mt-0.5">{currentStaff.role.replace('_', ' ')}</div>
+        <div className="border-t border-slate-800 p-4 flex items-center gap-3 text-[11px] text-slate-400">
+          <StaffAvatar name={currentStaff.name} photoUrl={currentStaff.photoUrl} size="sm" />
+          <div className="min-w-0 flex-1">
+            <div className="font-medium text-slate-200 truncate">{currentStaff.name}</div>
+            <div className="uppercase tracking-wider mt-0.5 truncate">{currentStaff.role.replace('_', ' ')}</div>
+          </div>
         </div>
       </aside>
 

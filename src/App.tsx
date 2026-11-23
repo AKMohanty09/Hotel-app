@@ -14,13 +14,14 @@ import {
   X,
 } from 'lucide-react';
 import { api, setAuthToken } from './services/api';
-import { signOutFirebase } from './lib/firebase';
 import { canAccessPortal, getDefaultPortalForRole } from './lib/permissions';
 import { useRealtimeSync } from './hooks/useRealtimeSync';
 import type { PortalKey, RestaurantSnapshot, StaffProfile } from './types/domain';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { OfflineBanner, PWAInstallButton } from './components/common/PWAWidgets';
 import { ManagerDashboardSkeleton } from './components/common/Skeleton';
+import { StaffAvatar } from './components/common/StaffAvatar';
+import { uploadImageFileToDatabase } from './lib/imageUtils';
 import { AuthGateway } from './components/auth/AuthGateway';
 import { CustomerPortal } from './components/customer/CustomerPortal';
 import { WaiterPortal } from './components/waiter/WaiterPortal';
@@ -61,7 +62,9 @@ function AppShell() {
   const [managerSidebarOpen, setManagerSidebarOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
+  const [profileEmail, setProfileEmail] = useState('');
   const [newPasscode, setNewPasscode] = useState('');
+  const [uploadingMyPhoto, setUploadingMyPhoto] = useState(false);
   const [resetMessage, setResetMessage] = useState('');
 
   useEffect(() => {
@@ -99,28 +102,34 @@ function AppShell() {
     }
   }, []);
 
+  const currentStaffId = currentStaff?.id ?? null;
+
   const fetchSnapshot = useCallback(async () => {
-    if (!currentStaff) return;
+    if (!currentStaffId) return;
     setLoadingSnapshot(true);
     setLoadError('');
     try {
       const data = await api.getSnapshot();
       setSnapshot(data);
       syncDefaultThemeIfUnset(data.settings.defaultTheme);
-      const updatedMe = data.staff.find((s) => s.id === currentStaff.id);
-      if (updatedMe) setCurrentStaff(updatedMe);
+      const updatedMe = data.staff.find((s) => s.id === currentStaffId);
+      if (updatedMe) {
+        setCurrentStaff((prev) =>
+          prev && JSON.stringify(prev) === JSON.stringify(updatedMe) ? prev : updatedMe
+        );
+      }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Unable to load workspace snapshot.');
     } finally {
       setLoadingSnapshot(false);
     }
-  }, [currentStaff, syncDefaultThemeIfUnset]);
+  }, [currentStaffId, syncDefaultThemeIfUnset]);
 
   useEffect(() => {
-    if (currentStaff && !customerQrToken) {
+    if (currentStaffId && !customerQrToken) {
       void fetchSnapshot();
     }
-  }, [currentStaff, customerQrToken, fetchSnapshot]);
+  }, [currentStaffId, customerQrToken, fetchSnapshot]);
 
   // Real-time WebSocket updates across all open terminals
   useRealtimeSync(
@@ -156,11 +165,6 @@ function AppShell() {
   const handleSignOut = async () => {
     try {
       await api.logout();
-    } catch {
-      // ignore
-    }
-    try {
-      await signOutFirebase();
     } catch {
       // ignore
     }
@@ -313,16 +317,18 @@ function AppShell() {
 
           <button
             type="button"
-            aria-label="Reset passcode"
-            title="Change Passcode"
+            aria-label="Account, profile photo and passcode settings"
+            title="Account, Profile Photo &amp; Passcode"
             onClick={() => {
               setResetOpen(true);
+              setProfileEmail(currentStaff.email);
               setNewPasscode('');
               setResetMessage('');
             }}
-            className="hidden sm:inline-flex rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-2 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700"
           >
-            <KeyRound className="h-4 w-4" />
+            <StaffAvatar name={currentStaff.name} photoUrl={currentStaff.photoUrl} size="xs" />
+            <KeyRound className="h-3.5 w-3.5 hidden sm:inline" />
           </button>
 
           <button
@@ -431,24 +437,19 @@ function AppShell() {
         </div>
       )}
 
-      {/* Self Passcode Reset Modal */}
+      {/* Account Email & Passcode Modal */}
       {resetOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true">
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              try {
-                await api.resetPassword(newPasscode);
-                setResetMessage('Passcode updated successfully.');
-                setNewPasscode('');
-              } catch (err) {
-                setResetMessage(err instanceof Error ? err.message : 'Unable to update passcode.');
-              }
-            }}
-            className="w-full max-w-sm rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6 shadow-xl space-y-4 text-xs"
-          >
+          <div className="w-full max-w-sm rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6 shadow-xl space-y-5 text-xs">
             <div className="flex items-center justify-between">
-              <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">Change My Passcode</h3>
+              <div>
+                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                  Account &amp; Security
+                </h3>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {currentStaff.name} · {currentStaff.employeeId}
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={() => setResetOpen(false)}
@@ -458,35 +459,155 @@ function AppShell() {
               </button>
             </div>
             {resetMessage && (
-              <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2 text-slate-800 dark:text-slate-200">{resetMessage}</div>
+              <div className="rounded-xl bg-slate-100 dark:bg-slate-800 px-3 py-2 text-slate-800 dark:text-slate-200">
+                {resetMessage}
+              </div>
             )}
-            <div>
-              <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1">New Passcode (6+ chars)</label>
-              <input
-                type="password"
-                required
-                minLength={6}
-                value={newPasscode}
-                onChange={(e) => setNewPasscode(e.target.value)}
-                className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
-              />
+
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 p-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <StaffAvatar name={currentStaff.name} photoUrl={currentStaff.photoUrl} size="md" />
+                <div className="min-w-0">
+                  <div className="font-semibold text-slate-800 dark:text-slate-100">Profile Photo</div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                    {currentStaff.photoUrl ? 'Saved in database' : 'No photo uploaded'}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <label className="cursor-pointer rounded-lg bg-slate-900 dark:bg-royal px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-slate-800">
+                  {uploadingMyPhoto ? 'Uploading...' : currentStaff.photoUrl ? 'Change' : 'Upload'}
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                    aria-label="Upload my profile photo"
+                    disabled={uploadingMyPhoto}
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      setUploadingMyPhoto(true);
+                      try {
+                        const url = await uploadImageFileToDatabase(file, 'staff', {
+                          maxDimension: 400,
+                          preferPng: false,
+                          quality: 0.84,
+                          entityId: currentStaff.id,
+                        });
+                        const res = await api.updateProfile({ photoUrl: url });
+                        setCurrentStaff(res.staff);
+                        setResetMessage('Profile photo uploaded and saved to database.');
+                        await fetchSnapshot();
+                      } catch (err) {
+                        setResetMessage(err instanceof Error ? err.message : 'Unable to upload photo.');
+                      } finally {
+                        setUploadingMyPhoto(false);
+                      }
+                    }}
+                  />
+                </label>
+                {currentStaff.photoUrl && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const res = await api.updateProfile({ photoUrl: '' });
+                        setCurrentStaff(res.staff);
+                        setResetMessage('Profile photo removed.');
+                        await fetchSnapshot();
+                      } catch (err) {
+                        setResetMessage(err instanceof Error ? err.message : 'Unable to remove photo.');
+                      }
+                    }}
+                    className="rounded-lg border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-[11px] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
             </div>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setResetOpen(false)}
-                className="rounded-xl border border-slate-200 dark:border-slate-700 px-4 py-2 text-sm text-slate-700 dark:text-slate-300"
+
+            {(currentStaff.role === 'owner' || currentStaff.role === 'manager') && (
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  try {
+                    const res = await api.updateProfile({ email: profileEmail });
+                    setCurrentStaff(res.staff);
+                    setProfileEmail(res.staff.email);
+                    setResetMessage(`Account email updated to ${res.staff.email}.`);
+                    await fetchSnapshot();
+                  } catch (err) {
+                    setResetMessage(err instanceof Error ? err.message : 'Unable to update email.');
+                  }
+                }}
+                className="space-y-2.5 border-b border-slate-200 dark:border-slate-800 pb-4"
               >
-                Close
-              </button>
-              <button
-                type="submit"
-                className="rounded-xl bg-orange-600 px-4 py-2 text-sm font-semibold text-white"
-              >
-                Save Passcode
-              </button>
-            </div>
-          </form>
+                <label className="block font-medium text-slate-700 dark:text-slate-300">
+                  {currentStaff.role === 'owner' ? 'Owner Email ID (Login)' : 'Account Email ID'}
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="email"
+                    required
+                    value={profileEmail}
+                    onChange={(e) => setProfileEmail(e.target.value)}
+                    placeholder="owner@restaurant.com"
+                    className="min-w-0 flex-1 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
+                  />
+                  <button
+                    type="submit"
+                    className="rounded-xl bg-slate-900 dark:bg-royal px-3.5 py-2 text-xs font-semibold text-white hover:bg-slate-800 shrink-0"
+                  >
+                    Update Email
+                  </button>
+                </div>
+              </form>
+            )}
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                try {
+                  await api.resetPassword(newPasscode);
+                  setResetMessage('Passcode updated successfully.');
+                  setNewPasscode('');
+                } catch (err) {
+                  setResetMessage(err instanceof Error ? err.message : 'Unable to update passcode.');
+                }
+              }}
+              className="space-y-3"
+            >
+              <div>
+                <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1">
+                  New Passcode (6+ chars)
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={newPasscode}
+                  onChange={(e) => setNewPasscode(e.target.value)}
+                  className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setResetOpen(false)}
+                  className="rounded-xl border border-slate-200 dark:border-slate-700 px-4 py-2 text-sm text-slate-700 dark:text-slate-300"
+                >
+                  Close
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-xl bg-orange-600 px-4 py-2 text-sm font-semibold text-white"
+                >
+                  Save Passcode
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 
