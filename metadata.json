@@ -1,0 +1,8 @@
+{
+  "name": "Saffron & Hearth OS",
+  "description": "Complete multi-portal restaurant operating system with permanent table QR verification, central order engine, Kitchen Display System, waiter service, billing, inventory, analytics, and delivery platform adapters.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

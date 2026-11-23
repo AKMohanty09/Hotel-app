@@ -1,0 +1,131 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Requested Royal Obsidian & Violet Theme Palette */
+  --color-obsidian: #0E0B1D;
+  --color-plum: #2A1E4D;
+  --color-royal: #5A3B8C;
+  --color-amethyst: #8B7CC7;
+  --color-lavender: #C9C2E3;
+  --color-dusk: #3A3A52;
+
+  /* Harmonized Cool-Lavender & Obsidian Neutral Scale */
+  --color-slate-50: #F7F5FC;
+  --color-slate-100: #EEEAF8;
+  --color-slate-200: #DCD6F0;
+  --color-slate-300: #C9C2E3;
+  --color-slate-400: #9C92C2;
+  --color-slate-500: #6E6591;
+  --color-slate-600: #3A3A52;
+  --color-slate-700: #3A3A52;
+  --color-slate-800: #2A1E4D;
+  --color-slate-900: #1C1538;
+  --color-slate-950: #0E0B1D;
+
+  /* Brand Interactive Accent Scale mapped to Royal Violet / Amethyst / Lavender */
+  --color-orange-50: #F4F1FC;
+  --color-orange-100: #EAE4F8;
+  --color-orange-200: #C9C2E3;
+  --color-orange-300: #B3A6DB;
+  --color-orange-400: #8B7CC7;
+  --color-orange-500: #7357B2;
+  --color-orange-600: #5A3B8C;
+  --color-orange-700: #4A2F76;
+  --color-orange-800: #38245E;
+  --color-orange-900: #2A1E4D;
+  --color-orange-950: #1A1336;
+}
+
+@layer base {
+  :root {
+    --font-display: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+    --shimmer-base: #EAE4F8;
+    --shimmer-highlight: #F7F5FC;
+    color-scheme: light;
+  }
+
+  .dark {
+    --shimmer-base: #2A1E4D;
+    --shimmer-highlight: #3A3A52;
+    color-scheme: dark;
+  }
+
+  body {
+    font-family: var(--font-body);
+    background-color: #F7F5FC;
+    color: #0E0B1D;
+  }
+
+  .dark body {
+    background-color: #0E0B1D;
+    color: #EEEAF8;
+  }
+
+  h1, h2, h3, h4, h5, h6, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono, .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Smooth Theme-Synced Skeleton Shimmer */
+@keyframes sh-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.skeleton-shimmer {
+  background-color: var(--shimmer-base);
+  background-image: linear-gradient(
+    110deg,
+    var(--shimmer-base) 25%,
+    var(--shimmer-highlight) 48%,
+    var(--shimmer-base) 72%
+  );
+  background-size: 220% 100%;
+  animation: sh-shimmer 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-shimmer {
+    animation: none;
+    background-image: none;
+  }
+}
+
+/* Hide scrollbars cleanly for horizontal pill strips */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Custom utility for safe mobile bottom padding */
+.pb-safe {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
+/* Print rules for A4 QR sheets and receipts */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+}
